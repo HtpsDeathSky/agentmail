@@ -223,8 +223,9 @@ const actionResult = (kind: MailActionResult["kind"], pendingActionId?: string):
 });
 
 const maskApiKey = (apiKey: string) => {
-  if (apiKey.length <= 4) return "****";
-  return `${apiKey.slice(0, 3)}...${apiKey.slice(-4)}`;
+  const codePoints = Array.from(apiKey.trim());
+  if (codePoints.length <= 4) return "****";
+  return `${codePoints.slice(0, 3).join("")}...${codePoints.slice(-4).join("")}`;
 };
 
 export const demoBackend = {
@@ -398,13 +399,15 @@ export const demoBackend = {
         return aiSettings;
       case "save_ai_settings": {
         const request = args?.request as SaveAiSettingsRequest;
-        const apiKey = request.api_key ?? "";
+        const apiKey = request.api_key?.trim() ?? "";
+        const apiKeyMask = apiKey ? maskApiKey(apiKey) : aiSettings?.api_key_mask;
+        if (!apiKeyMask) throw new Error("api_key is required");
         aiSettings = {
           provider_name: request.provider_name,
           base_url: request.base_url,
           model: request.model,
           enabled: request.enabled,
-          api_key_mask: apiKey ? maskApiKey(apiKey) : (aiSettings?.api_key_mask ?? null)
+          api_key_mask: apiKeyMask
         };
         return aiSettings;
       }
@@ -412,7 +415,7 @@ export const demoBackend = {
         aiSettings = null;
         return null;
       case "run_ai_analysis": {
-        if (!aiSettings || !aiSettings.enabled) throw new Error("AI settings are missing or disabled");
+        if (!aiSettings || !aiSettings.enabled || !aiSettings.api_key_mask) throw new Error("AI settings are missing or disabled");
         const messageId = args?.messageId as string;
         const message = messages.find((candidate) => candidate.id === messageId);
         if (!message) throw new Error("message not found");
