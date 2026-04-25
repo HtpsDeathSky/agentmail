@@ -1,0 +1,15 @@
+[package]
+name = "ai-remote"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+mail-core = { path = "../mail-core" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
