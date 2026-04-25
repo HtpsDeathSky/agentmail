@@ -1,5 +1,8 @@
 import type {
   AddAccountRequest,
+  AiInsight,
+  AiPriority,
+  AiSettingsView,
   ConnectionTestResult,
   MailAccount,
   MailActionAudit,
@@ -9,6 +12,7 @@ import type {
   MailMessage,
   MessageQuery,
   PendingMailAction,
+  SaveAiSettingsRequest,
   SendMessageDraft,
   SyncState,
   SyncSummary
@@ -184,6 +188,14 @@ let audits: MailActionAudit[] = [
 
 let accounts = [account];
 let pendingActions: PendingMailAction[] = [];
+let aiSettings: AiSettingsView | null = {
+  provider_name: "openai-compatible",
+  base_url: "https://api.example.com/v1",
+  model: "demo-mail-model",
+  enabled: true,
+  api_key_mask: "sk-...demo"
+};
+let aiInsights: AiInsight[] = [];
 
 const recordAudit = (
   action: MailActionAudit["action"],
@@ -209,6 +221,11 @@ const actionResult = (kind: MailActionResult["kind"], pendingActionId?: string):
   kind,
   pending_action_id: pendingActionId ?? null
 });
+
+const maskApiKey = (apiKey: string) => {
+  if (apiKey.length <= 4) return "****";
+  return `${apiKey.slice(0, 3)}...${apiKey.slice(-4)}`;
+};
 
 export const demoBackend = {
   async invoke(command: string, args?: Record<string, unknown>): Promise<unknown> {
@@ -376,6 +393,55 @@ export const demoBackend = {
         pending.updated_at = now();
         recordAudit(pending.action, pending.account_id, pending.message_ids, "rejected");
         return null;
+      }
+      case "get_ai_settings":
+        return aiSettings;
+      case "save_ai_settings": {
+        const request = args?.request as SaveAiSettingsRequest;
+        const apiKey = request.api_key ?? "";
+        aiSettings = {
+          provider_name: request.provider_name,
+          base_url: request.base_url,
+          model: request.model,
+          enabled: request.enabled,
+          api_key_mask: apiKey ? maskApiKey(apiKey) : (aiSettings?.api_key_mask ?? null)
+        };
+        return aiSettings;
+      }
+      case "clear_ai_settings":
+        aiSettings = null;
+        return null;
+      case "run_ai_analysis": {
+        if (!aiSettings || !aiSettings.enabled) throw new Error("AI settings are missing or disabled");
+        const messageId = args?.messageId as string;
+        const message = messages.find((candidate) => candidate.id === messageId);
+        if (!message) throw new Error("message not found");
+
+        const hasAction = /\b(action|required|confirm|waiting|before|tonight)\b/i.test(`${message.subject} ${message.body_preview}`);
+        const priority: AiPriority = hasAction ? "high" : "normal";
+        const todo = hasAction ? `Review and respond to "${message.subject}".` : `Read "${message.subject}" and file any follow-up.`;
+        const payload = {
+          summary: `${message.subject}: ${message.body_preview}`,
+          category: message.attachments.length > 0 ? "finance" : hasAction ? "operations" : "general",
+          priority,
+          todos: [todo],
+          reply_draft: `Thanks for the update on "${message.subject}". I will review and follow up shortly.`
+        };
+        const insight: AiInsight = {
+          id: `demo-ai-${message.id}-${aiInsights.filter((item) => item.message_id === message.id).length + 1}`,
+          message_id: message.id,
+          provider_name: aiSettings.provider_name,
+          model: aiSettings.model,
+          ...payload,
+          raw_json: JSON.stringify(payload),
+          created_at: now()
+        };
+        aiInsights = [insight, ...aiInsights];
+        return insight;
+      }
+      case "list_ai_insights": {
+        const messageId = args?.messageId as string;
+        return aiInsights.filter((insight) => insight.message_id === messageId);
       }
       default:
         throw new Error(`unknown demo command: ${command}`);

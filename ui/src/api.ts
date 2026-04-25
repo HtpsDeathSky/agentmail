@@ -164,6 +164,38 @@ export interface PendingMailAction {
   updated_at: Timestamp;
 }
 
+export type AiPriority = "low" | "normal" | "high" | "urgent";
+
+export interface AiSettingsView {
+  provider_name: string;
+  base_url: string;
+  model: string;
+  enabled: boolean;
+  api_key_mask?: string | null;
+}
+
+export interface SaveAiSettingsRequest {
+  provider_name: string;
+  base_url: string;
+  model: string;
+  api_key?: string | null;
+  enabled: boolean;
+}
+
+export interface AiInsight {
+  id: string;
+  message_id: string;
+  provider_name: string;
+  model: string;
+  summary: string;
+  category: string;
+  priority: AiPriority;
+  todos: string[];
+  reply_draft: string;
+  raw_json: string;
+  created_at: Timestamp;
+}
+
 type CommandMap = {
   add_account: MailAccount;
   test_account_connection: ConnectionTestResult;
@@ -180,6 +212,11 @@ type CommandMap = {
   list_pending_actions: PendingMailAction[];
   confirm_action: MailActionResult;
   reject_action: null;
+  get_ai_settings: AiSettingsView | null;
+  save_ai_settings: AiSettingsView;
+  clear_ai_settings: null;
+  run_ai_analysis: AiInsight;
+  list_ai_insights: AiInsight[];
 };
 
 const hasTauri = () => Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
@@ -207,5 +244,10 @@ export const api = {
   getAuditLog: (limit = 100) => call("get_audit_log", { limit }),
   listPendingActions: (accountId?: string | null) => call("list_pending_actions", { accountId: accountId ?? null }),
   confirmAction: (actionId: string) => call("confirm_action", { actionId }),
-  rejectAction: (actionId: string) => call("reject_action", { actionId })
+  rejectAction: (actionId: string) => call("reject_action", { actionId }),
+  getAiSettings: () => call("get_ai_settings"),
+  saveAiSettings: (request: SaveAiSettingsRequest) => call("save_ai_settings", { request }),
+  clearAiSettings: () => call("clear_ai_settings"),
+  runAiAnalysis: (messageId: string) => call("run_ai_analysis", { messageId }),
+  listAiInsights: (messageId: string) => call("list_ai_insights", { messageId })
 };
