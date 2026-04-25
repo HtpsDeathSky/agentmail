@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use mail_core::{AiAnalysisInput, AiInsightPayload, AiSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -70,7 +71,7 @@ impl AiProvider for MockAiProvider {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct OpenAiCompatibleProvider {
     client: reqwest::Client,
 }
@@ -78,6 +79,17 @@ pub struct OpenAiCompatibleProvider {
 impl OpenAiCompatibleProvider {
     pub fn new(client: reqwest::Client) -> Self {
         Self { client }
+    }
+}
+
+impl Default for OpenAiCompatibleProvider {
+    fn default() -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()
+                .expect("default reqwest client should build"),
+        }
     }
 }
 
@@ -124,9 +136,9 @@ impl AiProvider for OpenAiCompatibleProvider {
             .map_err(|err| AiRemoteError::Request(redact_api_key(err.to_string(), settings)))?;
 
         if !status.is_success() {
-            return Err(AiRemoteError::Request(redact_api_key(
-                format!("status {status}: {body}"),
-                settings,
+            let sanitized_body = sanitize_error_body(body, settings);
+            return Err(AiRemoteError::Request(format!(
+                "status {status}: {sanitized_body}"
             )));
         }
 
@@ -255,6 +267,21 @@ fn redact_api_key(message: String, settings: &AiSettings) -> String {
     }
 }
 
+const ERROR_BODY_MAX_CHARS: usize = 512;
+const TRUNCATED_ERROR_SUFFIX: &str = "... [truncated]";
+
+fn sanitize_error_body(body: String, settings: &AiSettings) -> String {
+    let redacted = redact_api_key(body, settings);
+    let mut chars = redacted.chars();
+    let truncated: String = chars.by_ref().take(ERROR_BODY_MAX_CHARS).collect();
+
+    if chars.next().is_some() {
+        format!("{truncated}{TRUNCATED_ERROR_SUFFIX}")
+    } else {
+        truncated
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +378,34 @@ mod tests {
 
         assert_eq!(redacted, "upstream echoed [REDACTED] in an error");
         assert!(!redacted.contains("sk-local-test"));
+    }
+
+    #[test]
+    fn sanitizes_long_error_body_by_redacting_key_and_truncating() {
+        let settings = settings();
+        let body = format!(
+            "provider leaked sk-local-test in a long response: {}",
+            "x".repeat(700)
+        );
+
+        let sanitized = sanitize_error_body(body, &settings);
+
+        assert!(sanitized.len() <= ERROR_BODY_MAX_CHARS + TRUNCATED_ERROR_SUFFIX.len());
+        assert!(sanitized.ends_with(TRUNCATED_ERROR_SUFFIX));
+        assert!(sanitized.contains("[REDACTED]"));
+        assert!(!sanitized.contains("sk-local-test"));
+    }
+
+    #[test]
+    fn sanitizes_short_error_body_by_redacting_key() {
+        let settings = settings();
+
+        let sanitized = sanitize_error_body(
+            "provider rejected api key sk-local-test".to_string(),
+            &settings,
+        );
+
+        assert_eq!(sanitized, "provider rejected api key [REDACTED]");
+        assert!(!sanitized.contains("sk-local-test"));
     }
 }
