@@ -23,6 +23,8 @@ import {
 import { FormEvent, useCallback, useEffect, useMemo, useState, useTransition } from "react";
 import {
   AddAccountRequest,
+  AiInsight,
+  AiSettingsView,
   api,
   MailAccount,
   MailActionAudit,
@@ -30,6 +32,7 @@ import {
   MailFolder,
   MailMessage,
   PendingMailAction,
+  SaveAiSettingsRequest,
   SendMessageDraft,
   SyncState
 } from "./api";
@@ -86,6 +89,11 @@ export function App() {
   const [status, setStatus] = useState("backend link idle");
   const [isAccountModalOpen, setAccountModalOpen] = useState(false);
   const [isComposerOpen, setComposerOpen] = useState(false);
+  const [aiSettings, setAiSettings] = useState<AiSettingsView | null>(null);
+  const [aiInsights, setAiInsights] = useState<AiInsight[]>([]);
+  const [isAnalyzing, setAnalyzing] = useState(false);
+  const [aiStatus, setAiStatus] = useState("ai link idle");
+  const [isAiSettingsOpen, setAiSettingsOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
 
   const selectedAccount = useMemo(
@@ -141,9 +149,23 @@ export function App() {
     setPendingActions(await api.listPendingActions(accountId));
   }, []);
 
+  const refreshAiSettings = useCallback(async () => {
+    setAiSettings(await api.getAiSettings());
+  }, []);
+
+  const refreshAiInsights = useCallback(async (messageId: string | null) => {
+    if (!messageId) {
+      setAiInsights([]);
+      return;
+    }
+    setAiInsights(await api.listAiInsights(messageId));
+  }, []);
+
   useEffect(() => {
-    void refreshAccounts().then(refreshAudits).catch((error) => setStatus(`startup failed: ${String(error)}`));
-  }, [refreshAccounts, refreshAudits]);
+    void Promise.all([refreshAccounts().then(refreshAudits), refreshAiSettings()]).catch((error) =>
+      setStatus(`startup failed: ${String(error)}`)
+    );
+  }, [refreshAccounts, refreshAiSettings, refreshAudits]);
 
   useEffect(() => {
     if (!selectedAccountId) return;
@@ -167,6 +189,10 @@ export function App() {
       setSelectedMessage(messages.find((message) => message.id === selectedMessageId) ?? null);
     });
   }, [messages, selectedMessageId]);
+
+  useEffect(() => {
+    void refreshAiInsights(selectedMessageId).catch((error) => setAiStatus(`ai insight load failed: ${String(error)}`));
+  }, [refreshAiInsights, selectedMessageId]);
 
   const handleSync = useCallback(async () => {
     if (!selectedAccountId) return;
@@ -233,6 +259,21 @@ export function App() {
     },
     [refreshAudits, refreshPendingActions]
   );
+
+  const handleAnalyze = useCallback(async () => {
+    if (!selectedMessageId) return;
+    setAnalyzing(true);
+    setAiStatus("ai analysis running");
+    try {
+      await api.runAiAnalysis(selectedMessageId);
+      await refreshAiInsights(selectedMessageId);
+      setAiStatus("ai analysis complete");
+    } catch (error) {
+      setAiStatus(`ai analysis failed: ${String(error)}`);
+    } finally {
+      setAnalyzing(false);
+    }
+  }, [refreshAiInsights, selectedMessageId]);
 
   const handleConfirmPending = useCallback(
     async (actionId: string) => {
@@ -410,13 +451,14 @@ export function App() {
                   </div>
                 ) : null}
               </article>
-              <aside className="ai-placeholder">
-                <div>
-                  <PanelRight size={15} />
-                  AI PIPELINE RESERVED
-                </div>
-                <p>Local model review and remote summary are intentionally disabled in MVP.</p>
-              </aside>
+              <AiPanel
+                settings={aiSettings}
+                insights={aiInsights}
+                status={aiStatus}
+                isAnalyzing={isAnalyzing}
+                onAnalyze={handleAnalyze}
+                onOpenSettings={() => setAiSettingsOpen(true)}
+              />
             </>
           ) : (
             <div className="empty-detail">
@@ -464,7 +506,170 @@ export function App() {
 
       {isAccountModalOpen ? <AccountModal onClose={() => setAccountModalOpen(false)} onCreated={handleAccountCreated} /> : null}
       {isComposerOpen && selectedAccount ? <Composer account={selectedAccount} onClose={() => setComposerOpen(false)} onSent={handleSent} /> : null}
+      {isAiSettingsOpen ? (
+        <AiSettingsModal settings={aiSettings} onClose={() => setAiSettingsOpen(false)} onSaved={refreshAiSettings} />
+      ) : null}
     </main>
+  );
+}
+
+interface AiPanelProps {
+  settings: AiSettingsView | null;
+  insights: AiInsight[];
+  status: string;
+  isAnalyzing: boolean;
+  onAnalyze: () => Promise<void>;
+  onOpenSettings: () => void;
+}
+
+function AiPanel({ settings, insights, status, isAnalyzing, onAnalyze, onOpenSettings }: AiPanelProps) {
+  const latest = insights[0] ?? null;
+  const keyStatus = settings?.api_key_mask ? settings.api_key_mask : "not set";
+
+  return (
+    <aside className="ai-panel">
+      <header>
+        <div>
+          <PanelRight size={15} />
+          <span>AI</span>
+        </div>
+        <button type="button" onClick={onOpenSettings} title="AI settings">
+          <Settings size={14} />
+        </button>
+      </header>
+      <div className="ai-status-grid">
+        <span>PROVIDER</span>
+        <code>{settings?.provider_name ?? "not set"}</code>
+        <span>MODEL</span>
+        <code>{settings?.model || "not set"}</code>
+        <span>KEY</span>
+        <code>{keyStatus}</code>
+      </div>
+      <div className="ai-actions">
+        <button type="button" onClick={onAnalyze} disabled={isAnalyzing || !settings?.enabled}>
+          {isAnalyzing ? "RUNNING" : "AI ANALYZE"}
+        </button>
+        <span>{settings?.enabled ? "enabled" : "disabled"}</span>
+      </div>
+      {latest ? (
+        <section className="ai-result">
+          <div>
+            <strong>{latest.category || "uncategorized"}</strong>
+            <code>{latest.priority}</code>
+          </div>
+          <p>{latest.summary}</p>
+          {latest.todos.length > 0 ? (
+            <ul className="ai-todo-list">
+              {latest.todos.map((todo) => (
+                <li key={todo}>{todo}</li>
+              ))}
+            </ul>
+          ) : null}
+          {latest.reply_draft ? <pre>{latest.reply_draft}</pre> : null}
+        </section>
+      ) : (
+        <section className="ai-result empty">No insight for this message.</section>
+      )}
+      {insights.length > 0 ? (
+        <div className="ai-history">
+          {insights.map((insight) => (
+            <div key={insight.id}>
+              <time>{formatTime(insight.created_at)}</time>
+              <span>{insight.category || "uncategorized"}</span>
+              <code>{insight.priority}</code>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <p className="ai-status-text">{status}</p>
+    </aside>
+  );
+}
+
+interface AiSettingsModalProps {
+  settings: AiSettingsView | null;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}
+
+function AiSettingsModal({ settings, onClose, onSaved }: AiSettingsModalProps) {
+  const [form, setForm] = useState<SaveAiSettingsRequest>({
+    provider_name: settings?.provider_name ?? "openai-compatible",
+    base_url: settings?.base_url ?? "https://api.openai.com/v1",
+    model: settings?.model ?? "",
+    api_key: "",
+    enabled: settings?.enabled ?? false
+  });
+  const [status, setStatus] = useState(settings?.api_key_mask ? `key saved: ${settings.api_key_mask}` : "key not set");
+  const [isSaving, setSaving] = useState(false);
+
+  const update = (field: keyof SaveAiSettingsRequest, value: string | boolean) => {
+    setForm((current) => ({ ...current, [field]: value }));
+  };
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    setStatus("saving ai settings");
+    try {
+      await api.saveAiSettings({
+        ...form,
+        api_key: form.api_key?.trim() ? form.api_key : null
+      });
+      await onSaved();
+      onClose();
+    } catch (error) {
+      setStatus(`save failed: ${String(error)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <form className="modal-panel ai-settings-form" onSubmit={submit}>
+        <header>
+          <h2>AI SETTINGS</h2>
+          <button className="icon-button" type="button" onClick={onClose} title="Close">
+            <X size={16} />
+          </button>
+        </header>
+        <label>
+          Provider
+          <input value={form.provider_name} onChange={(event) => update("provider_name", event.target.value)} required />
+        </label>
+        <label>
+          Base URL
+          <input value={form.base_url} onChange={(event) => update("base_url", event.target.value)} required />
+        </label>
+        <label>
+          Model
+          <input value={form.model} onChange={(event) => update("model", event.target.value)} required />
+        </label>
+        <label>
+          API Key
+          <input
+            type="password"
+            value={form.api_key ?? ""}
+            onChange={(event) => update("api_key", event.target.value)}
+            placeholder={settings?.api_key_mask ?? "sk-..."}
+          />
+        </label>
+        <label className="checkbox-row">
+          <input type="checkbox" checked={form.enabled} onChange={(event) => update("enabled", event.target.checked)} />
+          Enabled
+        </label>
+        <div className="modal-status">{status}</div>
+        <footer>
+          <button type="button" onClick={onClose}>
+            CANCEL
+          </button>
+          <button type="submit" disabled={isSaving}>
+            {isSaving ? "SAVING" : "SAVE"}
+          </button>
+        </footer>
+      </form>
+    </div>
   );
 }
 
