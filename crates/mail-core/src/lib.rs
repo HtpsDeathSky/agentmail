@@ -299,3 +299,86 @@ impl Default for MessageFetchRequest {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AiPriority {
+    Low,
+    Normal,
+    High,
+    Urgent,
+}
+
+impl Default for AiPriority {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AiSettings {
+    pub id: String,
+    pub provider_name: String,
+    pub base_url: String,
+    pub model: String,
+    pub api_key: String,
+    pub enabled: bool,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AiSettingsView {
+    pub provider_name: String,
+    pub base_url: String,
+    pub model: String,
+    pub enabled: bool,
+    pub api_key_mask: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SaveAiSettingsRequest {
+    pub provider_name: String,
+    pub base_url: String,
+    pub model: String,
+    pub api_key: Option<String>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AiAnalysisInput {
+    pub message_id: String,
+    pub subject: String,
+    pub sender: String,
+    pub recipients: Vec<String>,
+    pub cc: Vec<String>,
+    pub received_at: Timestamp,
+    pub body_preview: String,
+    pub body: Option<String>,
+    pub attachments: Vec<AttachmentRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AiInsightPayload {
+    pub summary: String,
+    pub category: String,
+    pub priority: AiPriority,
+    pub todos: Vec<String>,
+    pub reply_draft: String,
+    pub raw_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AiInsight {
+    pub id: String,
+    pub message_id: String,
+    pub provider_name: String,
+    pub model: String,
+    pub summary: String,
+    pub category: String,
+    pub priority: AiPriority,
+    pub todos: Vec<String>,
+    pub reply_draft: String,
+    pub raw_json: String,
+    pub created_at: Timestamp,
+}
