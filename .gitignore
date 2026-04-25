@@ -1,0 +1,11 @@
+target/
+node_modules/
+ui/dist/
+src-tauri/target/
+src-tauri/gen/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+.idea/
+.vscode/

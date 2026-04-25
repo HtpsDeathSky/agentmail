@@ -1,0 +1,18 @@
+[package]
+name = "app-api"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+mail-core = { path = "../mail-core" }
+mail-protocol = { path = "../mail-protocol" }
+mail-store = { path = "../mail-store" }
+secret-store = { path = "../secret-store" }
+parking_lot.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio.workspace = true

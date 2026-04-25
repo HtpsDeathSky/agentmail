@@ -1,0 +1,15 @@
+[package]
+name = "mail-protocol"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+async-native-tls = { version = "0.6", default-features = false, features = ["runtime-tokio"] }
+futures = "0.3"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-native-tls"] }
+mail-core = { path = "../mail-core" }
+mail-parser = "0.11"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net"] }

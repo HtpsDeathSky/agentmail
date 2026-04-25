@@ -1,0 +1,21 @@
+[package]
+name = "agentmail-app"
+version = "0.1.0"
+description = "AgentMail Windows desktop mail client"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "agentmail-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+app-api = { path = "../crates/app-api" }
+mail-core = { path = "../crates/mail-core" }
+serde.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tokio.workspace = true
