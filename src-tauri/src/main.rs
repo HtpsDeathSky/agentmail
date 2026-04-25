@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use app_api::{AddAccountRequest, AppApi, SyncSummary, TestConnectionRequest};
 use mail_core::{
-    ConnectionTestResult, MailAccount, MailActionAudit, MailActionRequest, MailActionResult,
-    MailFolder, MailMessage, MessageQuery, PendingMailAction, SendMessageDraft, SyncState,
+    AiInsight, AiSettingsView, ConnectionTestResult, MailAccount, MailActionAudit,
+    MailActionRequest, MailActionResult, MailFolder, MailMessage, MessageQuery, PendingMailAction,
+    SaveAiSettingsRequest, SendMessageDraft, SyncState,
 };
 use tauri::{Manager, State};
 
@@ -128,6 +129,40 @@ fn reject_action(state: State<'_, ApiState>, action_id: String) -> Result<(), St
     state.api.reject_action(action_id).map_err(to_error)
 }
 
+#[tauri::command]
+fn get_ai_settings(state: State<'_, ApiState>) -> Result<Option<AiSettingsView>, String> {
+    state.api.get_ai_settings().map_err(to_error)
+}
+
+#[tauri::command]
+fn save_ai_settings(
+    state: State<'_, ApiState>,
+    request: SaveAiSettingsRequest,
+) -> Result<AiSettingsView, String> {
+    state.api.save_ai_settings(request).map_err(to_error)
+}
+
+#[tauri::command]
+fn clear_ai_settings(state: State<'_, ApiState>) -> Result<(), String> {
+    state.api.clear_ai_settings().map_err(to_error)
+}
+
+#[tauri::command]
+async fn run_ai_analysis(
+    state: State<'_, ApiState>,
+    message_id: String,
+) -> Result<AiInsight, String> {
+    state.api.run_ai_analysis(message_id).await.map_err(to_error)
+}
+
+#[tauri::command]
+fn list_ai_insights(
+    state: State<'_, ApiState>,
+    message_id: String,
+) -> Result<Vec<AiInsight>, String> {
+    state.api.list_ai_insights(message_id).map_err(to_error)
+}
+
 fn to_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -174,6 +209,11 @@ fn main() {
             list_pending_actions,
             confirm_action,
             reject_action,
+            get_ai_settings,
+            save_ai_settings,
+            clear_ai_settings,
+            run_ai_analysis,
+            list_ai_insights,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run AgentMail");
