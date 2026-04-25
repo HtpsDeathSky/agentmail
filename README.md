@@ -14,11 +14,12 @@ Windows-first desktop mail client MVP built with Tauri v2, Rust, React/Vite, SQL
 - Pending action queue for high-risk actions. SMTP send is queued first and only executes after explicit confirmation.
 - Tauri startup triggers background sync for accounts with `sync_enabled=true`.
 - Desktop UI shell with account/folder rail, message list, detail pane, compose modal, search, sync controls, and bottom operations console.
-- AI modules are intentionally reserved for a later phase.
+- AI analysis is manual only for the selected message. The remote provider must expose an OpenAI-compatible API.
+- AI API keys are stored plaintext in SQLite for this MVP. After save, the full key is not returned to the UI.
 
 ## Commands
 
-This repo assumes Node is managed by `fnm` and package management is through `pnpm`.
+This repo assumes Node is managed by `fnm` and package management is through `pnpm`; do not use `npm` or `npx`.
 
 ```bash
 pnpm install

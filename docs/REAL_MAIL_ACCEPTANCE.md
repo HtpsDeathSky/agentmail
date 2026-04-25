@@ -35,9 +35,17 @@ Use a disposable or dedicated test mailbox. Do not run destructive checks on a p
 - Confirm the pending send; the message should be delivered.
 - Compose another test message and reject it; no message should be delivered.
 
+## AI Acceptance
+
+- Configure AI provider settings with an OpenAI-compatible endpoint.
+- Analyze one non-sensitive test message.
+- Confirm summary, category, priority, todos, and reply draft appear.
+- Reopen the same message and confirm saved insight history remains.
+- Clear or update AI settings.
+
 ## Known Limits
 
 - Attachment files are not downloaded yet; only metadata is indexed.
 - Permanent delete is intentionally disabled.
-- AI local review and remote summaries are not enabled in this phase.
+- AI analysis is manual only; API keys are stored plaintext in SQLite for this MVP.
 - OAuth is not implemented; use provider app passwords where required.
