@@ -210,6 +210,7 @@ impl MailStore {
             );
             "#,
         )?;
+        ensure_ai_insights_message_fk(&conn)?;
         ensure_column(
             &conn,
             "sync_states",
@@ -938,6 +939,46 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, alter_sql: &str) 
     Ok(())
 }
 
+fn ensure_ai_insights_message_fk(conn: &Connection) -> StoreResult<()> {
+    let mut stmt = conn.prepare("PRAGMA foreign_key_list(ai_insights)")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let table: String = row.get(2)?;
+        let from: String = row.get(3)?;
+        if table == "messages" && from == "message_id" {
+            return Ok(());
+        }
+    }
+    drop(rows);
+    drop(stmt);
+
+    conn.execute_batch(
+        r#"
+        DROP TABLE IF EXISTS ai_insights_new;
+        CREATE TABLE ai_insights_new (
+          id TEXT PRIMARY KEY,
+          message_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+        INSERT INTO ai_insights_new (id, message_id, kind, payload_json, created_at)
+        SELECT id, message_id, kind, payload_json, created_at
+        FROM ai_insights
+        WHERE EXISTS (
+          SELECT 1
+          FROM messages
+          WHERE messages.id = ai_insights.message_id
+        );
+        DROP TABLE ai_insights;
+        ALTER TABLE ai_insights_new RENAME TO ai_insights;
+        PRAGMA foreign_keys = ON;
+        "#,
+    )?;
+    Ok(())
+}
+
 fn account_from_row(row: &Row<'_>) -> rusqlite::Result<MailAccount> {
     Ok(MailAccount {
         id: row.get(0)?,
@@ -1467,5 +1508,147 @@ mod tests {
         assert_eq!(rows[0].priority, AiPriority::High);
         assert_eq!(rows[0].todos, vec!["Reply before 18:00".to_string()]);
         assert!(store.list_ai_insights("other-message").unwrap().is_empty());
+    }
+
+    #[test]
+    fn migrate_rebuilds_ai_insights_missing_message_foreign_key() {
+        let store = MailStore::memory().unwrap();
+        let now = now_rfc3339();
+        let account = MailAccount {
+            id: "acct".to_string(),
+            display_name: "Ops".to_string(),
+            email: "ops@example.com".to_string(),
+            imap_host: "imap.example.com".to_string(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_port: 465,
+            smtp_tls: true,
+            sync_enabled: true,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        store.save_account(&account).unwrap();
+        let folder = MailFolder {
+            id: "inbox".to_string(),
+            account_id: account.id.clone(),
+            name: "INBOX".to_string(),
+            path: "INBOX".to_string(),
+            role: FolderRole::Inbox,
+            unread_count: 1,
+            total_count: 1,
+        };
+        store.save_folder(&folder).unwrap();
+        store
+            .upsert_message(&MailMessage {
+                id: "message-1".to_string(),
+                account_id: account.id,
+                folder_id: folder.id,
+                uid: Some("1".to_string()),
+                message_id_header: None,
+                subject: "Quarterly hardening report".to_string(),
+                sender: "security@example.com".to_string(),
+                recipients: vec!["ops@example.com".to_string()],
+                cc: vec![],
+                received_at: now.clone(),
+                body_preview: "Firewall drift and backup coverage".to_string(),
+                body: Some("Firewall drift requires review".to_string()),
+                attachments: vec![],
+                flags: MessageFlags::default(),
+                size_bytes: Some(2048),
+                deleted_at: None,
+            })
+            .unwrap();
+
+        let valid = AiInsight {
+            id: "insight-valid".to_string(),
+            message_id: "message-1".to_string(),
+            provider_name: "openai-compatible".to_string(),
+            model: "mail-model".to_string(),
+            summary: "Valid summary".to_string(),
+            category: "operations".to_string(),
+            priority: AiPriority::High,
+            todos: vec!["Reply before 18:00".to_string()],
+            reply_draft: "Acknowledged.".to_string(),
+            raw_json: "{\"summary\":\"Valid summary\"}".to_string(),
+            created_at: now.clone(),
+        };
+        let orphan = AiInsight {
+            id: "insight-orphan".to_string(),
+            message_id: "missing-message".to_string(),
+            provider_name: "openai-compatible".to_string(),
+            model: "mail-model".to_string(),
+            summary: "Orphan summary".to_string(),
+            category: "operations".to_string(),
+            priority: AiPriority::Low,
+            todos: Vec::new(),
+            reply_draft: String::new(),
+            raw_json: "{\"summary\":\"Orphan summary\"}".to_string(),
+            created_at: now.clone(),
+        };
+
+        {
+            let conn = store.conn.lock();
+            conn.execute_batch(
+                r#"
+                DROP TABLE ai_insights;
+                CREATE TABLE ai_insights (
+                  id TEXT PRIMARY KEY,
+                  message_id TEXT NOT NULL,
+                  kind TEXT NOT NULL,
+                  payload_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                );
+                "#,
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO ai_insights (id, message_id, kind, payload_json, created_at) VALUES (?1, ?2, 'mail_analysis', ?3, ?4)",
+                params![
+                    valid.id,
+                    valid.message_id,
+                    serde_json::to_string(&valid).unwrap(),
+                    valid.created_at,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO ai_insights (id, message_id, kind, payload_json, created_at) VALUES (?1, ?2, 'mail_analysis', ?3, ?4)",
+                params![
+                    orphan.id,
+                    orphan.message_id,
+                    serde_json::to_string(&orphan).unwrap(),
+                    orphan.created_at,
+                ],
+            )
+            .unwrap();
+        }
+
+        store.migrate().unwrap();
+
+        let has_message_fk = {
+            let conn = store.conn.lock();
+            let mut stmt = conn
+                .prepare("PRAGMA foreign_key_list(ai_insights)")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+                })
+                .unwrap();
+            let has_message_fk = rows
+                .map(|row| row.unwrap())
+                .any(|(table, from)| table == "messages" && from == "message_id");
+            has_message_fk
+        };
+        assert!(has_message_fk);
+
+        let valid_rows = store.list_ai_insights("message-1").unwrap();
+        assert_eq!(valid_rows.len(), 1);
+        assert_eq!(valid_rows[0].summary, "Valid summary");
+        assert!(store
+            .list_ai_insights("missing-message")
+            .unwrap()
+            .is_empty());
     }
 }
