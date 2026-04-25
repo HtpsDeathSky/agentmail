@@ -156,7 +156,8 @@ impl MailStore {
               message_id TEXT NOT NULL,
               kind TEXT NOT NULL,
               payload_json TEXT NOT NULL,
-              created_at TEXT NOT NULL
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS ai_audits (
@@ -1397,6 +1398,53 @@ mod tests {
     #[test]
     fn ai_insights_round_trip_by_message() {
         let store = MailStore::memory().unwrap();
+        let now = now_rfc3339();
+        let account = MailAccount {
+            id: "acct".to_string(),
+            display_name: "Ops".to_string(),
+            email: "ops@example.com".to_string(),
+            imap_host: "imap.example.com".to_string(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_port: 465,
+            smtp_tls: true,
+            sync_enabled: true,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        store.save_account(&account).unwrap();
+        let folder = MailFolder {
+            id: "inbox".to_string(),
+            account_id: account.id.clone(),
+            name: "INBOX".to_string(),
+            path: "INBOX".to_string(),
+            role: FolderRole::Inbox,
+            unread_count: 1,
+            total_count: 1,
+        };
+        store.save_folder(&folder).unwrap();
+        store
+            .upsert_message(&MailMessage {
+                id: "message-1".to_string(),
+                account_id: account.id,
+                folder_id: folder.id,
+                uid: Some("1".to_string()),
+                message_id_header: None,
+                subject: "Quarterly hardening report".to_string(),
+                sender: "security@example.com".to_string(),
+                recipients: vec!["ops@example.com".to_string()],
+                cc: vec![],
+                received_at: now.clone(),
+                body_preview: "Firewall drift and backup coverage".to_string(),
+                body: Some("Firewall drift requires review".to_string()),
+                attachments: vec![],
+                flags: MessageFlags::default(),
+                size_bytes: Some(2048),
+                deleted_at: None,
+            })
+            .unwrap();
+
         let insight = AiInsight {
             id: "insight-1".to_string(),
             message_id: "message-1".to_string(),
@@ -1408,7 +1456,7 @@ mod tests {
             todos: vec!["Reply before 18:00".to_string()],
             reply_draft: "Acknowledged.".to_string(),
             raw_json: "{\"summary\":\"Short summary\"}".to_string(),
-            created_at: now_rfc3339(),
+            created_at: now,
         };
 
         store.save_ai_insight(&insight).unwrap();
