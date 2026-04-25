@@ -53,7 +53,7 @@ impl MailStore {
     }
 
     pub fn migrate(&self) -> StoreResult<()> {
-        let conn = self.conn.lock();
+        let mut conn = self.conn.lock();
         conn.execute_batch(
             r#"
             PRAGMA foreign_keys = ON;
@@ -210,7 +210,7 @@ impl MailStore {
             );
             "#,
         )?;
-        ensure_ai_insights_message_fk(&conn)?;
+        ensure_ai_insights_message_fk(&mut conn)?;
         ensure_column(
             &conn,
             "sync_states",
@@ -939,20 +939,27 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, alter_sql: &str) 
     Ok(())
 }
 
-fn ensure_ai_insights_message_fk(conn: &Connection) -> StoreResult<()> {
+fn ensure_ai_insights_message_fk(conn: &mut Connection) -> StoreResult<()> {
     let mut stmt = conn.prepare("PRAGMA foreign_key_list(ai_insights)")?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let table: String = row.get(2)?;
         let from: String = row.get(3)?;
-        if table == "messages" && from == "message_id" {
+        let to: String = row.get(4)?;
+        let on_delete: String = row.get(6)?;
+        if table == "messages"
+            && from == "message_id"
+            && to == "id"
+            && on_delete.eq_ignore_ascii_case("CASCADE")
+        {
             return Ok(());
         }
     }
     drop(rows);
     drop(stmt);
 
-    conn.execute_batch(
+    let tx = conn.transaction()?;
+    tx.execute_batch(
         r#"
         DROP TABLE IF EXISTS ai_insights_new;
         CREATE TABLE ai_insights_new (
@@ -973,9 +980,10 @@ fn ensure_ai_insights_message_fk(conn: &Connection) -> StoreResult<()> {
         );
         DROP TABLE ai_insights;
         ALTER TABLE ai_insights_new RENAME TO ai_insights;
-        PRAGMA foreign_keys = ON;
         "#,
     )?;
+    tx.commit()?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     Ok(())
 }
 
@@ -1511,7 +1519,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_rebuilds_ai_insights_missing_message_foreign_key() {
+    fn migrate_rebuilds_ai_insights_legacy_message_foreign_key() {
         let store = MailStore::memory().unwrap();
         let now = now_rfc3339();
         let account = MailAccount {
@@ -1591,13 +1599,15 @@ mod tests {
             let conn = store.conn.lock();
             conn.execute_batch(
                 r#"
+                PRAGMA foreign_keys = OFF;
                 DROP TABLE ai_insights;
                 CREATE TABLE ai_insights (
                   id TEXT PRIMARY KEY,
                   message_id TEXT NOT NULL,
                   kind TEXT NOT NULL,
                   payload_json TEXT NOT NULL,
-                  created_at TEXT NOT NULL
+                  created_at TEXT NOT NULL,
+                  FOREIGN KEY(message_id) REFERENCES messages(id)
                 );
                 "#,
             )
@@ -1622,26 +1632,37 @@ mod tests {
                 ],
             )
             .unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         }
 
         store.migrate().unwrap();
 
-        let has_message_fk = {
+        let has_cascade_message_fk = {
             let conn = store.conn.lock();
             let mut stmt = conn
                 .prepare("PRAGMA foreign_key_list(ai_insights)")
                 .unwrap();
             let rows = stmt
                 .query_map([], |row| {
-                    Ok((row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+                    Ok((
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(6)?,
+                    ))
                 })
                 .unwrap();
-            let has_message_fk = rows
-                .map(|row| row.unwrap())
-                .any(|(table, from)| table == "messages" && from == "message_id");
-            has_message_fk
+            let has_cascade_message_fk =
+                rows.map(|row| row.unwrap())
+                    .any(|(table, from, to, on_delete)| {
+                        table == "messages"
+                            && from == "message_id"
+                            && to == "id"
+                            && on_delete.eq_ignore_ascii_case("CASCADE")
+                    });
+            has_cascade_message_fk
         };
-        assert!(has_message_fk);
+        assert!(has_cascade_message_fk);
 
         let valid_rows = store.list_ai_insights("message-1").unwrap();
         assert_eq!(valid_rows.len(), 1);
