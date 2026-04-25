@@ -315,7 +315,7 @@ impl Default for AiPriority {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AiSettings {
     pub id: String,
     pub provider_name: String,
@@ -325,6 +325,21 @@ pub struct AiSettings {
     pub enabled: bool,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
+}
+
+impl std::fmt::Debug for AiSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AiSettings")
+            .field("id", &self.id)
+            .field("provider_name", &self.provider_name)
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &"***")
+            .field("enabled", &self.enabled)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -365,6 +380,7 @@ pub struct AiInsightPayload {
     pub priority: AiPriority,
     pub todos: Vec<String>,
     pub reply_draft: String,
+    #[serde(default, skip_deserializing)]
     pub raw_json: String,
 }
 
