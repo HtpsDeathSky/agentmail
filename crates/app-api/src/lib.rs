@@ -439,6 +439,10 @@ impl AppApi {
             .store
             .get_ai_settings()?
             .ok_or_else(|| ApiError::InvalidRequest("ai settings are required".to_string()))?;
+        if !settings.enabled {
+            return Err(ai_remote::AiRemoteError::Disabled.into());
+        }
+
         let message = self.store.get_message(&message_id)?;
         let input = ai_analysis_input(&message);
         let payload = self.ai_provider.analyze_mail(&settings, &input).await?;
@@ -1012,11 +1016,14 @@ fn ai_settings_view(settings: AiSettings) -> AiSettingsView {
 }
 
 fn mask_api_key(api_key: &str) -> String {
-    if api_key.len() <= 4 {
+    let chars: Vec<char> = api_key.chars().collect();
+    if chars.len() <= 4 {
         return "****".to_string();
     }
 
-    format!("{}...{}", &api_key[..3], &api_key[api_key.len() - 4..])
+    let prefix: String = chars.iter().take(3).collect();
+    let suffix: String = chars.iter().skip(chars.len() - 4).collect();
+    format!("{prefix}...{suffix}")
 }
 
 fn ai_analysis_input(message: &MailMessage) -> AiAnalysisInput {
@@ -1069,6 +1076,30 @@ mod tests {
         assert_ne!(loaded.api_key_mask, Some("sk-local-test".to_string()));
     }
 
+    #[test]
+    fn unicode_ai_settings_key_is_saved_and_masked() {
+        let api = AppApi::new(
+            MailStore::memory().unwrap(),
+            Arc::new(MemorySecretStore::default()),
+            Arc::new(MockMailProtocol),
+        );
+
+        let saved = api
+            .save_ai_settings(SaveAiSettingsRequest {
+                provider_name: "openai-compatible".to_string(),
+                base_url: "https://api.example.com/v1".to_string(),
+                model: "mail-model".to_string(),
+                api_key: Some("钥匙abcdef".to_string()),
+                enabled: true,
+            })
+            .unwrap();
+
+        assert_eq!(saved.api_key_mask, Some("钥匙a...cdef".to_string()));
+
+        let loaded = api.get_ai_settings().unwrap().unwrap();
+        assert_eq!(loaded.api_key_mask, Some("钥匙a...cdef".to_string()));
+    }
+
     #[tokio::test]
     async fn run_ai_analysis_requires_settings() {
         let api = AppApi::new_with_ai_provider(
@@ -1087,6 +1118,33 @@ mod tests {
             }
             other => panic!("expected invalid request for missing ai settings, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn disabled_ai_settings_do_not_call_provider_or_store_insight() {
+        let api = AppApi::new_with_ai_provider(
+            MailStore::memory().unwrap(),
+            Arc::new(MemorySecretStore::default()),
+            Arc::new(MockMailProtocol),
+            Arc::new(MockAiProvider::new(ai_payload())),
+        );
+        let account = add_sample_account(&api).await;
+        api.sync_account(account.id.clone()).await.unwrap();
+        let message = first_message(&api, &account.id);
+        api.save_ai_settings(SaveAiSettingsRequest {
+            provider_name: "openai-compatible".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            model: "mail-model".to_string(),
+            api_key: Some("sk-local-test".to_string()),
+            enabled: false,
+        })
+        .unwrap();
+
+        assert!(matches!(
+            api.run_ai_analysis(message.id.clone()).await,
+            Err(ApiError::AiRemote(AiRemoteError::Disabled))
+        ));
+        assert!(api.list_ai_insights(message.id).unwrap().is_empty());
     }
 
     #[tokio::test]

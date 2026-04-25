@@ -351,13 +351,46 @@ pub struct AiSettingsView {
     pub api_key_mask: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SaveAiSettingsRequest {
     pub provider_name: String,
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
     pub enabled: bool,
+}
+
+impl std::fmt::Debug for SaveAiSettingsRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SaveAiSettingsRequest")
+            .field("provider_name", &self.provider_name)
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "***"))
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_ai_settings_request_debug_redacts_api_key() {
+        let request = SaveAiSettingsRequest {
+            provider_name: "openai-compatible".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            model: "mail-model".to_string(),
+            api_key: Some("sk-plaintext-secret".to_string()),
+            enabled: true,
+        };
+
+        let debug = format!("{request:?}");
+
+        assert!(!debug.contains("sk-plaintext-secret"));
+        assert!(debug.contains("***"));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
