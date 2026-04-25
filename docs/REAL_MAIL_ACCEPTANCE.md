@@ -5,7 +5,7 @@ Use a disposable or dedicated test mailbox. Do not run destructive checks on a p
 ## Environment
 
 - Node is managed by `fnm`.
-- Use `pnpm`, not `npm`.
+- Use `pnpm`, not `npm` or `npx`.
 - IMAP must support TLS.
 - SMTP must use implicit TLS on port `465` or STARTTLS on port `587`.
 
@@ -19,7 +19,7 @@ Use a disposable or dedicated test mailbox. Do not run destructive checks on a p
 
 ## Sync Acceptance
 
-- The folder rail shows Inbox, Sent, Archive, Trash, Drafts, and any provider-specific folders returned by IMAP.
+- The folder rail shows Inbox. Sent, Archive, Trash, Drafts, and provider-specific folders appear when returned as selectable IMAP folders.
 - Selecting each synced folder loads messages for that folder, not only Inbox.
 - `SYNC & CONNECTIONS` shows the account as idle after sync.
 - Re-running sync does not duplicate messages.
@@ -29,8 +29,8 @@ Use a disposable or dedicated test mailbox. Do not run destructive checks on a p
 
 - Mark a message read and unread; confirm the state changes locally and after a resync.
 - Star and unstar a message; confirm the state changes locally and after a resync.
-- Delete a test message; it should move to Trash, not be permanently deleted.
-- Move or archive a test message if the target folder exists; it should leave the source folder.
+- Delete a test message only when a synced Trash folder exists; it should move to Trash, not be permanently deleted. If Trash is not synced, create or sync it first, or mark this check not applicable.
+- Move or archive a test message if the target folder exists; it should leave the source folder. Use a test mailbox/provider with Sent, Archive, Trash, and Drafts for action checks that require those folders.
 - Compose a test message; it must appear in `PENDING ACTIONS` before sending.
 - Confirm the pending send; the message should be delivered.
 - Compose another test message and reject it; no message should be delivered.
