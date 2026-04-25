@@ -152,7 +152,11 @@ async fn run_ai_analysis(
     state: State<'_, ApiState>,
     message_id: String,
 ) -> Result<AiInsight, String> {
-    state.api.run_ai_analysis(message_id).await.map_err(to_error)
+    state
+        .api
+        .run_ai_analysis(message_id)
+        .await
+        .map_err(to_error)
 }
 
 #[tauri::command]
