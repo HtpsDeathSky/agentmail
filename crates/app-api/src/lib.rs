@@ -2,12 +2,14 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use ai_remote::{AiProvider, OpenAiCompatibleProvider};
 use mail_core::{
     new_id, now_plus_seconds_rfc3339, now_rfc3339, timestamp_is_future, ActionAuditStatus,
-    ConnectionSettings, ConnectionTestResult, FolderRole, MailAccount, MailActionAudit,
-    MailActionKind, MailActionRequest, MailActionResult, MailActionResultKind, MailFolder,
-    MailMessage, MessageFetchRequest, MessageQuery, PendingActionStatus, PendingMailAction,
-    RemoteMailAction, SendMessageDraft, SyncState, SyncStateKind,
+    AiAnalysisInput, AiInsight, AiSettings, AiSettingsView, ConnectionSettings,
+    ConnectionTestResult, FolderRole, MailAccount, MailActionAudit, MailActionKind,
+    MailActionRequest, MailActionResult, MailActionResultKind, MailFolder, MailMessage,
+    MessageFetchRequest, MessageQuery, PendingActionStatus, PendingMailAction, RemoteMailAction,
+    SaveAiSettingsRequest, SendMessageDraft, SyncState, SyncStateKind,
 };
 use mail_protocol::{LiveMailProtocol, MailProtocol, ProtocolError};
 use mail_store::{MailStore, MessageFlagPatch, StoreError};
@@ -24,6 +26,8 @@ pub enum ApiError {
     Secret(#[from] SecretError),
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
+    #[error(transparent)]
+    AiRemote(#[from] ai_remote::AiRemoteError),
     #[error("blocked action requires explicit confirmation: {0:?}")]
     ConfirmationRequired(MailActionKind),
     #[error("sync already running for account: {0}")]
@@ -44,6 +48,7 @@ pub struct AppApi {
     store: MailStore,
     secrets: Arc<dyn SecretStore>,
     protocol: Arc<dyn MailProtocol>,
+    ai_provider: Arc<dyn AiProvider>,
     sync_locks: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -53,10 +58,25 @@ impl AppApi {
         secrets: Arc<dyn SecretStore>,
         protocol: Arc<dyn MailProtocol>,
     ) -> Self {
+        Self::new_with_ai_provider(
+            store,
+            secrets,
+            protocol,
+            Arc::new(OpenAiCompatibleProvider::default()),
+        )
+    }
+
+    pub fn new_with_ai_provider(
+        store: MailStore,
+        secrets: Arc<dyn SecretStore>,
+        protocol: Arc<dyn MailProtocol>,
+        ai_provider: Arc<dyn AiProvider>,
+    ) -> Self {
         Self {
             store,
             secrets,
             protocol,
+            ai_provider,
             sync_locks: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -372,6 +392,80 @@ impl AppApi {
 
     pub fn search_messages(&self, term: String, limit: Option<u32>) -> ApiResult<Vec<MailMessage>> {
         Ok(self.store.search_messages(&term, limit.unwrap_or(100))?)
+    }
+
+    pub fn get_ai_settings(&self) -> ApiResult<Option<AiSettingsView>> {
+        Ok(self.store.get_ai_settings()?.map(ai_settings_view))
+    }
+
+    pub fn save_ai_settings(&self, request: SaveAiSettingsRequest) -> ApiResult<AiSettingsView> {
+        let provider_name = required_trimmed(request.provider_name, "provider_name")?;
+        let base_url = required_trimmed(request.base_url, "base_url")?;
+        let model = required_trimmed(request.model, "model")?;
+        let existing = self.store.get_ai_settings()?;
+        let api_key = match request.api_key {
+            Some(api_key) => required_trimmed(api_key, "api_key")?,
+            None => existing
+                .as_ref()
+                .map(|settings| settings.api_key.clone())
+                .ok_or_else(|| ApiError::InvalidRequest("api_key is required".to_string()))?,
+        };
+        let now = now_rfc3339();
+        let settings = AiSettings {
+            id: "default".to_string(),
+            provider_name,
+            base_url,
+            model,
+            api_key,
+            enabled: request.enabled,
+            created_at: existing
+                .as_ref()
+                .map(|settings| settings.created_at.clone())
+                .unwrap_or_else(|| now.clone()),
+            updated_at: now,
+        };
+
+        self.store.save_ai_settings(&settings)?;
+        Ok(ai_settings_view(settings))
+    }
+
+    pub fn clear_ai_settings(&self) -> ApiResult<()> {
+        self.store.clear_ai_settings()?;
+        Ok(())
+    }
+
+    pub async fn run_ai_analysis(&self, message_id: String) -> ApiResult<AiInsight> {
+        let settings = self
+            .store
+            .get_ai_settings()?
+            .ok_or_else(|| ApiError::InvalidRequest("ai settings are required".to_string()))?;
+        let message = self.store.get_message(&message_id)?;
+        let input = ai_analysis_input(&message);
+        let payload = self.ai_provider.analyze_mail(&settings, &input).await?;
+        let raw_json = if payload.raw_json.is_empty() {
+            serde_json::to_string(&payload).unwrap_or_default()
+        } else {
+            payload.raw_json.clone()
+        };
+        let insight = AiInsight {
+            id: new_id(),
+            message_id: message.id,
+            provider_name: settings.provider_name,
+            model: settings.model,
+            summary: payload.summary,
+            category: payload.category,
+            priority: payload.priority,
+            todos: payload.todos,
+            reply_draft: payload.reply_draft,
+            raw_json,
+            created_at: now_rfc3339(),
+        };
+        self.store.save_ai_insight(&insight)?;
+        Ok(insight)
+    }
+
+    pub fn list_ai_insights(&self, message_id: String) -> ApiResult<Vec<AiInsight>> {
+        Ok(self.store.list_ai_insights(&message_id)?)
     }
 
     pub async fn execute_mail_action(
@@ -899,15 +993,142 @@ fn confirmation_action_for_request(request: &MailActionRequest) -> MailActionKin
     }
 }
 
+fn required_trimmed(value: String, field: &str) -> ApiResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::InvalidRequest(format!("{field} is required")));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn ai_settings_view(settings: AiSettings) -> AiSettingsView {
+    AiSettingsView {
+        provider_name: settings.provider_name,
+        base_url: settings.base_url,
+        model: settings.model,
+        enabled: settings.enabled,
+        api_key_mask: Some(mask_api_key(&settings.api_key)),
+    }
+}
+
+fn mask_api_key(api_key: &str) -> String {
+    if api_key.len() <= 4 {
+        return "****".to_string();
+    }
+
+    format!("{}...{}", &api_key[..3], &api_key[api_key.len() - 4..])
+}
+
+fn ai_analysis_input(message: &MailMessage) -> AiAnalysisInput {
+    AiAnalysisInput {
+        message_id: message.id.clone(),
+        subject: message.subject.clone(),
+        sender: message.sender.clone(),
+        recipients: message.recipients.clone(),
+        cc: message.cc.clone(),
+        received_at: message.received_at.clone(),
+        body_preview: message.body_preview.clone(),
+        body: message.body.clone(),
+        attachments: message.attachments.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ai_remote::{AiRemoteError, MockAiProvider};
     use async_trait::async_trait;
-    use mail_core::FolderRole;
+    use mail_core::{AiInsightPayload, AiPriority, FolderRole, SaveAiSettingsRequest};
     use mail_protocol::MockMailProtocol;
     use mail_protocol::ProtocolResult;
     use mail_store::MailStore;
     use secret_store::MemorySecretStore;
+
+    #[test]
+    fn ai_settings_are_saved_and_masked() {
+        let api = AppApi::new(
+            MailStore::memory().unwrap(),
+            Arc::new(MemorySecretStore::default()),
+            Arc::new(MockMailProtocol),
+        );
+
+        let saved = api
+            .save_ai_settings(SaveAiSettingsRequest {
+                provider_name: "openai-compatible".to_string(),
+                base_url: "https://api.example.com/v1".to_string(),
+                model: "mail-model".to_string(),
+                api_key: Some("sk-local-test".to_string()),
+                enabled: true,
+            })
+            .unwrap();
+
+        assert_eq!(saved.api_key_mask, Some("sk-...test".to_string()));
+
+        let loaded = api.get_ai_settings().unwrap().unwrap();
+        assert_eq!(loaded.api_key_mask, Some("sk-...test".to_string()));
+        assert_ne!(loaded.api_key_mask, Some("sk-local-test".to_string()));
+    }
+
+    #[tokio::test]
+    async fn run_ai_analysis_requires_settings() {
+        let api = AppApi::new_with_ai_provider(
+            MailStore::memory().unwrap(),
+            Arc::new(MemorySecretStore::default()),
+            Arc::new(MockMailProtocol),
+            Arc::new(MockAiProvider::new(ai_payload())),
+        );
+        let account = add_sample_account(&api).await;
+        api.sync_account(account.id.clone()).await.unwrap();
+        let message = first_message(&api, &account.id);
+
+        match api.run_ai_analysis(message.id).await {
+            Err(ApiError::InvalidRequest(message)) => {
+                assert!(message.contains("ai settings"));
+            }
+            other => panic!("expected invalid request for missing ai settings, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_ai_analysis_stores_provider_result() {
+        let api = AppApi::new_with_ai_provider(
+            MailStore::memory().unwrap(),
+            Arc::new(MemorySecretStore::default()),
+            Arc::new(MockMailProtocol),
+            Arc::new(MockAiProvider::new(ai_payload())),
+        );
+        let account = add_sample_account(&api).await;
+        api.sync_account(account.id.clone()).await.unwrap();
+        let message = first_message(&api, &account.id);
+        save_test_ai_settings(&api);
+
+        let insight = api.run_ai_analysis(message.id.clone()).await.unwrap();
+        let stored = api.list_ai_insights(message.id).unwrap();
+
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0], insight);
+        assert_eq!(stored[0].summary, "Short summary");
+        assert_eq!(stored[0].priority, AiPriority::High);
+    }
+
+    #[tokio::test]
+    async fn provider_failure_does_not_store_insight() {
+        let api = AppApi::new_with_ai_provider(
+            MailStore::memory().unwrap(),
+            Arc::new(MemorySecretStore::default()),
+            Arc::new(MockMailProtocol),
+            Arc::new(MockAiProvider::error(AiRemoteError::Request(
+                "forced failure".to_string(),
+            ))),
+        );
+        let account = add_sample_account(&api).await;
+        api.sync_account(account.id.clone()).await.unwrap();
+        let message = first_message(&api, &account.id);
+        save_test_ai_settings(&api);
+
+        assert!(api.run_ai_analysis(message.id.clone()).await.is_err());
+        assert!(api.list_ai_insights(message.id).unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn account_sync_populates_folders_and_messages() {
@@ -1250,6 +1471,28 @@ mod tests {
         .into_iter()
         .next()
         .unwrap()
+    }
+
+    fn save_test_ai_settings(api: &AppApi) {
+        api.save_ai_settings(SaveAiSettingsRequest {
+            provider_name: "openai-compatible".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            model: "mail-model".to_string(),
+            api_key: Some("sk-local-test".to_string()),
+            enabled: true,
+        })
+        .unwrap();
+    }
+
+    fn ai_payload() -> AiInsightPayload {
+        AiInsightPayload {
+            summary: "Short summary".to_string(),
+            category: "operations".to_string(),
+            priority: AiPriority::High,
+            todos: vec!["Reply before 18:00".to_string()],
+            reply_draft: "Acknowledged.".to_string(),
+            raw_json: "{\"summary\":\"Short summary\"}".to_string(),
+        }
     }
 
     struct RecordingProtocol {
