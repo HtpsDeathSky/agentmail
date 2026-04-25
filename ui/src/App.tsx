@@ -20,7 +20,7 @@ import {
   Trash2,
   X
 } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useMemo, useState, useTransition } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import {
   AddAccountRequest,
   AiInsight,
@@ -92,9 +92,12 @@ export function App() {
   const [aiSettings, setAiSettings] = useState<AiSettingsView | null>(null);
   const [aiInsights, setAiInsights] = useState<AiInsight[]>([]);
   const [isAnalyzing, setAnalyzing] = useState(false);
+  const [isActionRunning, setActionRunning] = useState(false);
   const [aiStatus, setAiStatus] = useState("ai link idle");
   const [isAiSettingsOpen, setAiSettingsOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
+  const messagesRef = useRef<MailMessage[]>([]);
+  const selectedMessageIdRef = useRef<string | null>(null);
 
   const selectedAccount = useMemo(
     () => accounts.find((account) => account.id === selectedAccountId) ?? null,
@@ -153,13 +156,11 @@ export function App() {
     setAiSettings(await api.getAiSettings());
   }, []);
 
-  const refreshAiInsights = useCallback(async (messageId: string | null) => {
-    if (!messageId) {
-      setAiInsights([]);
-      return;
-    }
-    setAiInsights(await api.listAiInsights(messageId));
-  }, []);
+  const aiHeaderStatus = useMemo(() => {
+    if (aiSettings?.enabled && aiSettings.api_key_mask) return "AI READY";
+    if (aiSettings) return aiSettings.enabled ? "AI OFFLINE" : "AI DISABLED";
+    return "AI OFFLINE";
+  }, [aiSettings]);
 
   useEffect(() => {
     void Promise.all([refreshAccounts().then(refreshAudits), refreshAiSettings()]).catch((error) =>
@@ -181,18 +182,51 @@ export function App() {
   }, [query, refreshMessages, selectedAccountId, selectedFolderId]);
 
   useEffect(() => {
-    if (!selectedMessageId) {
-      setSelectedMessage(null);
-      return;
-    }
-    void api.getMessage(selectedMessageId).then(setSelectedMessage).catch(() => {
-      setSelectedMessage(messages.find((message) => message.id === selectedMessageId) ?? null);
-    });
-  }, [messages, selectedMessageId]);
+    messagesRef.current = messages;
+  }, [messages]);
 
   useEffect(() => {
-    void refreshAiInsights(selectedMessageId).catch((error) => setAiStatus(`ai insight load failed: ${String(error)}`));
-  }, [refreshAiInsights, selectedMessageId]);
+    selectedMessageIdRef.current = selectedMessageId;
+  }, [selectedMessageId]);
+
+  useEffect(() => {
+    setSelectedMessage(null);
+    if (!selectedMessageId) {
+      return;
+    }
+    let isCancelled = false;
+    const messageId = selectedMessageId;
+    void api
+      .getMessage(messageId)
+      .then((message) => {
+        if (!isCancelled) setSelectedMessage(message);
+      })
+      .catch(() => {
+        if (!isCancelled) setSelectedMessage(messagesRef.current.find((message) => message.id === messageId) ?? null);
+      });
+    return () => {
+      isCancelled = true;
+    };
+  }, [selectedMessageId]);
+
+  useEffect(() => {
+    setAiInsights([]);
+    setAiStatus("ai link idle");
+    if (!selectedMessageId) return;
+    let isCancelled = false;
+    const messageId = selectedMessageId;
+    void api
+      .listAiInsights(messageId)
+      .then((insights) => {
+        if (!isCancelled) setAiInsights(insights);
+      })
+      .catch((error) => {
+        if (!isCancelled) setAiStatus(`ai insight load failed: ${String(error)}`);
+      });
+    return () => {
+      isCancelled = true;
+    };
+  }, [selectedMessageId]);
 
   const handleSync = useCallback(async () => {
     if (!selectedAccountId) return;
@@ -214,19 +248,37 @@ export function App() {
 
   const runAction = useCallback(
     async (action: MailActionKind, targetFolderId?: string | null) => {
-      if (!selectedAccountId || !selectedMessageId) return;
-      const result = await api.executeMailAction({
-        action,
-        account_id: selectedAccountId,
-        message_ids: [selectedMessageId],
-        target_folder_id: targetFolderId ?? null
-      });
-      await refreshMessages(selectedAccountId, selectedFolderId, query);
-      await refreshAudits();
-      await refreshPendingActions(selectedAccountId);
-      setStatus(result.kind === "pending" ? `action queued: ${actionLabels[action]}` : `action executed: ${actionLabels[action]}`);
+      if (!selectedAccountId || !selectedMessageId || isActionRunning || isAnalyzing) return;
+      setActionRunning(true);
+      setStatus(`action running: ${actionLabels[action]}`);
+      try {
+        const result = await api.executeMailAction({
+          action,
+          account_id: selectedAccountId,
+          message_ids: [selectedMessageId],
+          target_folder_id: targetFolderId ?? null
+        });
+        await refreshMessages(selectedAccountId, selectedFolderId, query);
+        await refreshAudits();
+        await refreshPendingActions(selectedAccountId);
+        setStatus(result.kind === "pending" ? `action queued: ${actionLabels[action]}` : `action executed: ${actionLabels[action]}`);
+      } catch (error) {
+        setStatus(`action failed: ${actionLabels[action]} / ${String(error)}`);
+      } finally {
+        setActionRunning(false);
+      }
     },
-    [query, refreshAudits, refreshMessages, refreshPendingActions, selectedAccountId, selectedFolderId, selectedMessageId]
+    [
+      isActionRunning,
+      isAnalyzing,
+      query,
+      refreshAudits,
+      refreshMessages,
+      refreshPendingActions,
+      selectedAccountId,
+      selectedFolderId,
+      selectedMessageId
+    ]
   );
 
   const handleAccountCreated = useCallback(
@@ -261,23 +313,28 @@ export function App() {
   );
 
   const handleAnalyze = useCallback(async () => {
-    if (!selectedMessageId) return;
+    if (!selectedMessageId || isActionRunning) return;
+    const messageId = selectedMessageId;
     setAnalyzing(true);
     setAiStatus("ai analysis running");
     try {
-      await api.runAiAnalysis(selectedMessageId);
-      await refreshAiInsights(selectedMessageId);
+      await api.runAiAnalysis(messageId);
+      if (selectedMessageIdRef.current !== messageId) return;
+      const insights = await api.listAiInsights(messageId);
+      if (selectedMessageIdRef.current !== messageId) return;
+      setAiInsights(insights);
       setAiStatus("ai analysis complete");
     } catch (error) {
-      setAiStatus(`ai analysis failed: ${String(error)}`);
+      if (selectedMessageIdRef.current === messageId) setAiStatus(`ai analysis failed: ${String(error)}`);
     } finally {
       setAnalyzing(false);
     }
-  }, [refreshAiInsights, selectedMessageId]);
+  }, [isActionRunning, selectedMessageId]);
 
   const handleConfirmPending = useCallback(
     async (actionId: string) => {
-      if (!selectedAccountId) return;
+      if (!selectedAccountId || isActionRunning || isAnalyzing) return;
+      setActionRunning(true);
       try {
         await api.confirmAction(actionId);
         await refreshMessages(selectedAccountId, selectedFolderId, query);
@@ -288,20 +345,31 @@ export function App() {
         await refreshAudits();
         await refreshPendingActions(selectedAccountId);
         setStatus(`confirm failed: ${String(error)}`);
+      } finally {
+        setActionRunning(false);
       }
     },
-    [query, refreshAudits, refreshMessages, refreshPendingActions, selectedAccountId, selectedFolderId]
+    [isActionRunning, isAnalyzing, query, refreshAudits, refreshMessages, refreshPendingActions, selectedAccountId, selectedFolderId]
   );
 
   const handleRejectPending = useCallback(
     async (actionId: string) => {
-      if (!selectedAccountId) return;
-      await api.rejectAction(actionId);
-      await refreshAudits();
-      await refreshPendingActions(selectedAccountId);
-      setStatus(`pending action rejected`);
+      if (!selectedAccountId || isActionRunning || isAnalyzing) return;
+      setActionRunning(true);
+      try {
+        await api.rejectAction(actionId);
+        await refreshAudits();
+        await refreshPendingActions(selectedAccountId);
+        setStatus(`pending action rejected`);
+      } catch (error) {
+        await refreshAudits();
+        await refreshPendingActions(selectedAccountId);
+        setStatus(`reject failed: ${String(error)}`);
+      } finally {
+        setActionRunning(false);
+      }
     },
-    [refreshAudits, refreshPendingActions, selectedAccountId]
+    [isActionRunning, isAnalyzing, refreshAudits, refreshPendingActions, selectedAccountId]
   );
 
   return (
@@ -375,7 +443,7 @@ export function App() {
             </div>
             <div className="health-chip">
               <ShieldCheck size={14} />
-              AI OFFLINE
+              {aiHeaderStatus}
             </div>
           </div>
           <div className="message-list">
@@ -403,15 +471,23 @@ export function App() {
           {selectedMessage ? (
             <>
               <div className="detail-toolbar">
-                <button type="button" onClick={() => runAction(selectedMessage.flags.is_read ? "mark_unread" : "mark_read")}>
+                <button
+                  type="button"
+                  onClick={() => runAction(selectedMessage.flags.is_read ? "mark_unread" : "mark_read")}
+                  disabled={isActionRunning || isAnalyzing}
+                >
                   <CheckCheck size={15} />
                   {selectedMessage.flags.is_read ? "UNREAD" : "READ"}
                 </button>
-                <button type="button" onClick={() => runAction(selectedMessage.flags.is_starred ? "unstar" : "star")}>
+                <button
+                  type="button"
+                  onClick={() => runAction(selectedMessage.flags.is_starred ? "unstar" : "star")}
+                  disabled={isActionRunning || isAnalyzing}
+                >
                   <Star size={15} />
                   {selectedMessage.flags.is_starred ? "UNSTAR" : "STAR"}
                 </button>
-                <button type="button" onClick={() => runAction("delete")}>
+                <button type="button" onClick={() => runAction("delete")} disabled={isActionRunning || isAnalyzing}>
                   <Trash2 size={15} />
                   DELETE
                 </button>
@@ -456,6 +532,7 @@ export function App() {
                 insights={aiInsights}
                 status={aiStatus}
                 isAnalyzing={isAnalyzing}
+                isActionRunning={isActionRunning}
                 onAnalyze={handleAnalyze}
                 onOpenSettings={() => setAiSettingsOpen(true)}
               />
@@ -492,7 +569,12 @@ export function App() {
             TEST / SYNC ACCOUNT
           </button>
         </section>
-        <PendingActionQueue actions={pendingActions} onConfirm={handleConfirmPending} onReject={handleRejectPending} />
+        <PendingActionQueue
+          actions={pendingActions}
+          isActionRunning={isActionRunning || isAnalyzing}
+          onConfirm={handleConfirmPending}
+          onReject={handleRejectPending}
+        />
         <section className="console-panel audit-feed">
           <header>AUDIT / ACTIVITY LOG</header>
           <p>{accountSyncState?.error_message ?? status}</p>
@@ -518,11 +600,12 @@ interface AiPanelProps {
   insights: AiInsight[];
   status: string;
   isAnalyzing: boolean;
+  isActionRunning: boolean;
   onAnalyze: () => Promise<void>;
   onOpenSettings: () => void;
 }
 
-function AiPanel({ settings, insights, status, isAnalyzing, onAnalyze, onOpenSettings }: AiPanelProps) {
+function AiPanel({ settings, insights, status, isAnalyzing, isActionRunning, onAnalyze, onOpenSettings }: AiPanelProps) {
   const latest = insights[0] ?? null;
   const keyStatus = settings?.api_key_mask ? settings.api_key_mask : "not set";
 
@@ -546,7 +629,7 @@ function AiPanel({ settings, insights, status, isAnalyzing, onAnalyze, onOpenSet
         <code>{keyStatus}</code>
       </div>
       <div className="ai-actions">
-        <button type="button" onClick={onAnalyze} disabled={isAnalyzing || !settings?.enabled}>
+        <button type="button" onClick={onAnalyze} disabled={isAnalyzing || isActionRunning || !settings?.enabled}>
           {isAnalyzing ? "RUNNING" : "AI ANALYZE"}
         </button>
         <span>{settings?.enabled ? "enabled" : "disabled"}</span>
@@ -680,11 +763,12 @@ interface AccountModalProps {
 
 interface PendingActionQueueProps {
   actions: PendingMailAction[];
+  isActionRunning: boolean;
   onConfirm: (actionId: string) => Promise<void>;
   onReject: (actionId: string) => Promise<void>;
 }
 
-function PendingActionQueue({ actions, onConfirm, onReject }: PendingActionQueueProps) {
+function PendingActionQueue({ actions, isActionRunning, onConfirm, onReject }: PendingActionQueueProps) {
   return (
     <section className="console-panel pending-feed">
       <header>PENDING ACTIONS</header>
@@ -694,10 +778,10 @@ function PendingActionQueue({ actions, onConfirm, onReject }: PendingActionQueue
           <code>{actionLabels[action.action] ?? action.action}</code>
           <span>{action.draft?.subject ?? `${action.message_ids.length} MSG`}</span>
           <div>
-            <button type="button" onClick={() => onConfirm(action.id)} title="Confirm action">
+            <button type="button" onClick={() => onConfirm(action.id)} disabled={isActionRunning} title="Confirm action">
               <CheckCheck size={13} />
             </button>
-            <button type="button" onClick={() => onReject(action.id)} title="Reject action">
+            <button type="button" onClick={() => onReject(action.id)} disabled={isActionRunning} title="Reject action">
               <X size={13} />
             </button>
           </div>
