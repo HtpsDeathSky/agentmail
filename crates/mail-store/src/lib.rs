@@ -2,9 +2,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use mail_core::{
-    now_rfc3339, ActionAuditStatus, AttachmentRef, FolderRole, MailAccount, MailActionAudit,
-    MailActionKind, MailFolder, MailMessage, MessageFlags, MessageQuery, PendingActionStatus,
-    PendingMailAction, SyncState, SyncStateKind,
+    now_rfc3339, ActionAuditStatus, AiInsight, AiSettings, AttachmentRef, FolderRole, MailAccount,
+    MailActionAudit, MailActionKind, MailFolder, MailMessage, MessageFlags, MessageQuery,
+    PendingActionStatus, PendingMailAction, SyncState, SyncStateKind,
 };
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -140,13 +140,23 @@ impl MailStore {
               FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS ai_settings (
+              id TEXT PRIMARY KEY,
+              provider_name TEXT NOT NULL,
+              base_url TEXT NOT NULL,
+              model TEXT NOT NULL,
+              api_key TEXT NOT NULL,
+              enabled INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS ai_insights (
               id TEXT PRIMARY KEY,
               message_id TEXT NOT NULL,
               kind TEXT NOT NULL,
               payload_json TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+              created_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS ai_audits (
@@ -810,6 +820,94 @@ impl MailStore {
         )?;
         Ok(())
     }
+
+    pub fn save_ai_settings(&self, settings: &AiSettings) -> StoreResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            r#"
+            INSERT INTO ai_settings (
+              id, provider_name, base_url, model, api_key, enabled, created_at, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(id) DO UPDATE SET
+              provider_name=excluded.provider_name,
+              base_url=excluded.base_url,
+              model=excluded.model,
+              api_key=excluded.api_key,
+              enabled=excluded.enabled,
+              updated_at=excluded.updated_at
+            "#,
+            params![
+                settings.id,
+                settings.provider_name,
+                settings.base_url,
+                settings.model,
+                settings.api_key,
+                settings.enabled,
+                settings.created_at,
+                settings.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_ai_settings(&self) -> StoreResult<Option<AiSettings>> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            r#"
+            SELECT id, provider_name, base_url, model, api_key, enabled, created_at, updated_at
+            FROM ai_settings
+            WHERE id = 'default'
+            "#,
+            [],
+            ai_settings_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn clear_ai_settings(&self) -> StoreResult<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM ai_settings", [])?;
+        Ok(())
+    }
+
+    pub fn save_ai_insight(&self, insight: &AiInsight) -> StoreResult<()> {
+        let payload_json = serde_json::to_string(insight)?;
+        let conn = self.conn.lock();
+        conn.execute(
+            r#"
+            INSERT INTO ai_insights (id, message_id, kind, payload_json, created_at)
+            VALUES (?1, ?2, 'mail_analysis', ?3, ?4)
+            ON CONFLICT(id) DO UPDATE SET
+              message_id=excluded.message_id,
+              kind=excluded.kind,
+              payload_json=excluded.payload_json,
+              created_at=excluded.created_at
+            "#,
+            params![
+                insight.id,
+                insight.message_id,
+                payload_json,
+                insight.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_ai_insights(&self, message_id: &str) -> StoreResult<Vec<AiInsight>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT payload_json
+            FROM ai_insights
+            WHERE message_id = ?1 AND kind = 'mail_analysis'
+            ORDER BY created_at DESC
+            "#,
+        )?;
+        let rows = stmt.query_map(params![message_id], ai_insight_from_row)?;
+        collect_rows(rows)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -958,6 +1056,26 @@ fn pending_action_from_row(row: &Row<'_>) -> rusqlite::Result<PendingMailAction>
     })
 }
 
+fn ai_settings_from_row(row: &Row<'_>) -> rusqlite::Result<AiSettings> {
+    Ok(AiSettings {
+        id: row.get(0)?,
+        provider_name: row.get(1)?,
+        base_url: row.get(2)?,
+        model: row.get(3)?,
+        api_key: row.get(4)?,
+        enabled: row.get::<_, bool>(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+fn ai_insight_from_row(row: &Row<'_>) -> rusqlite::Result<AiInsight> {
+    let payload_json: String = row.get(0)?;
+    serde_json::from_str::<AiInsight>(&payload_json).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })
+}
+
 fn folder_role_to_str(role: FolderRole) -> &'static str {
     match role {
         FolderRole::Inbox => "inbox",
@@ -1082,7 +1200,10 @@ fn pending_status_from_str(status: &str) -> PendingActionStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mail_core::{new_id, FolderRole, MailAccount, MailFolder, MailMessage, MessageFlags};
+    use mail_core::{
+        new_id, AiInsight, AiPriority, AiSettings, FolderRole, MailAccount, MailFolder,
+        MailMessage, MessageFlags,
+    };
 
     #[test]
     fn stores_and_searches_messages() {
@@ -1246,5 +1367,57 @@ mod tests {
             store.get_pending_action(&pending.id).unwrap().status,
             PendingActionStatus::Rejected
         );
+    }
+
+    #[test]
+    fn ai_settings_round_trip_and_clear() {
+        let store = MailStore::memory().unwrap();
+        let now = now_rfc3339();
+        let settings = AiSettings {
+            id: "default".to_string(),
+            provider_name: "openai-compatible".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            model: "mail-model".to_string(),
+            api_key: "sk-local-test".to_string(),
+            enabled: true,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+
+        store.save_ai_settings(&settings).unwrap();
+        assert_eq!(
+            store.get_ai_settings().unwrap().unwrap().api_key,
+            "sk-local-test"
+        );
+
+        store.clear_ai_settings().unwrap();
+        assert!(store.get_ai_settings().unwrap().is_none());
+    }
+
+    #[test]
+    fn ai_insights_round_trip_by_message() {
+        let store = MailStore::memory().unwrap();
+        let insight = AiInsight {
+            id: "insight-1".to_string(),
+            message_id: "message-1".to_string(),
+            provider_name: "openai-compatible".to_string(),
+            model: "mail-model".to_string(),
+            summary: "Short summary".to_string(),
+            category: "operations".to_string(),
+            priority: AiPriority::High,
+            todos: vec!["Reply before 18:00".to_string()],
+            reply_draft: "Acknowledged.".to_string(),
+            raw_json: "{\"summary\":\"Short summary\"}".to_string(),
+            created_at: now_rfc3339(),
+        };
+
+        store.save_ai_insight(&insight).unwrap();
+        let rows = store.list_ai_insights("message-1").unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].summary, "Short summary");
+        assert_eq!(rows[0].priority, AiPriority::High);
+        assert_eq!(rows[0].todos, vec!["Reply before 18:00".to_string()]);
+        assert!(store.list_ai_insights("other-message").unwrap().is_empty());
     }
 }
