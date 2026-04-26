@@ -37,7 +37,7 @@ Use a disposable or dedicated test mailbox. Do not run destructive checks on a p
 
 ## AI Acceptance
 
-- Configure AI provider settings with an OpenAI-compatible endpoint.
+- Configure AI provider settings with an HTTPS OpenAI-compatible endpoint.
 - Analyze one non-sensitive test message.
 - Confirm summary, category, priority, todos, and reply draft appear.
 - Reopen the same message and confirm saved insight history remains.
@@ -47,5 +47,5 @@ Use a disposable or dedicated test mailbox. Do not run destructive checks on a p
 
 - Attachment files are not downloaded yet; only metadata is indexed.
 - Permanent delete is intentionally disabled.
-- AI analysis is manual only; API keys are stored plaintext in SQLite for this MVP.
+- AI analysis is manual only; API keys are stored plaintext in SQLite for this MVP, and only masked keys are returned to the UI.
 - OAuth is not implemented; use provider app passwords where required.

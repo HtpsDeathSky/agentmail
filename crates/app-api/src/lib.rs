@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use ai_remote::{AiProvider, OpenAiCompatibleProvider};
+use ai_remote::{validate_remote_base_url, AiProvider, OpenAiCompatibleProvider};
 use mail_core::{
     new_id, now_plus_seconds_rfc3339, now_rfc3339, timestamp_is_future, ActionAuditStatus,
     AiAnalysisInput, AiInsight, AiSettings, AiSettingsView, ConnectionSettings,
@@ -401,6 +401,8 @@ impl AppApi {
     pub fn save_ai_settings(&self, request: SaveAiSettingsRequest) -> ApiResult<AiSettingsView> {
         let provider_name = required_trimmed(request.provider_name, "provider_name")?;
         let base_url = required_trimmed(request.base_url, "base_url")?;
+        validate_remote_base_url(&base_url)
+            .map_err(|error| ApiError::InvalidRequest(error.to_string()))?;
         let model = required_trimmed(request.model, "model")?;
         let existing = self.store.get_ai_settings()?;
         let api_key = match request.api_key {
@@ -1017,7 +1019,7 @@ fn ai_settings_view(settings: AiSettings) -> AiSettingsView {
 
 fn mask_api_key(api_key: &str) -> String {
     let chars: Vec<char> = api_key.chars().collect();
-    if chars.len() <= 4 {
+    if chars.len() <= 8 {
         return "****".to_string();
     }
 
@@ -1077,6 +1079,27 @@ mod tests {
     }
 
     #[test]
+    fn short_ai_settings_key_is_not_reconstructable_from_mask() {
+        let api = AppApi::new(
+            MailStore::memory().unwrap(),
+            Arc::new(MemorySecretStore::default()),
+            Arc::new(MockMailProtocol),
+        );
+
+        let saved = api
+            .save_ai_settings(SaveAiSettingsRequest {
+                provider_name: "openai-compatible".to_string(),
+                base_url: "https://api.example.com/v1".to_string(),
+                model: "mail-model".to_string(),
+                api_key: Some("abcdefg".to_string()),
+                enabled: true,
+            })
+            .unwrap();
+
+        assert_eq!(saved.api_key_mask, Some("****".to_string()));
+    }
+
+    #[test]
     fn unicode_ai_settings_key_is_saved_and_masked() {
         let api = AppApi::new(
             MailStore::memory().unwrap(),
@@ -1089,15 +1112,39 @@ mod tests {
                 provider_name: "openai-compatible".to_string(),
                 base_url: "https://api.example.com/v1".to_string(),
                 model: "mail-model".to_string(),
-                api_key: Some("钥匙abcdef".to_string()),
+                api_key: Some("钥匙abcdefghi".to_string()),
                 enabled: true,
             })
             .unwrap();
 
-        assert_eq!(saved.api_key_mask, Some("钥匙a...cdef".to_string()));
+        assert_eq!(saved.api_key_mask, Some("钥匙a...fghi".to_string()));
 
         let loaded = api.get_ai_settings().unwrap().unwrap();
-        assert_eq!(loaded.api_key_mask, Some("钥匙a...cdef".to_string()));
+        assert_eq!(loaded.api_key_mask, Some("钥匙a...fghi".to_string()));
+    }
+
+    #[test]
+    fn save_ai_settings_rejects_cleartext_remote_base_url() {
+        let api = AppApi::new(
+            MailStore::memory().unwrap(),
+            Arc::new(MemorySecretStore::default()),
+            Arc::new(MockMailProtocol),
+        );
+
+        let result = api.save_ai_settings(SaveAiSettingsRequest {
+            provider_name: "openai-compatible".to_string(),
+            base_url: "http://api.example.com/v1".to_string(),
+            model: "mail-model".to_string(),
+            api_key: Some("sk-local-test".to_string()),
+            enabled: true,
+        });
+
+        match result {
+            Err(ApiError::InvalidRequest(message)) => {
+                assert!(message.contains("https"));
+            }
+            other => panic!("expected https validation error, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1167,6 +1214,30 @@ mod tests {
         assert_eq!(stored[0], insight);
         assert_eq!(stored[0].summary, "Short summary");
         assert_eq!(stored[0].priority, AiPriority::High);
+    }
+
+    #[tokio::test]
+    async fn run_ai_analysis_sends_selected_message_body_to_provider() {
+        let provider = RecordingAiProvider::default();
+        let captured = Arc::clone(&provider.inputs);
+        let api = AppApi::new_with_ai_provider(
+            MailStore::memory().unwrap(),
+            Arc::new(MemorySecretStore::default()),
+            Arc::new(MockMailProtocol),
+            Arc::new(provider),
+        );
+        let account = add_sample_account(&api).await;
+        api.sync_account(account.id.clone()).await.unwrap();
+        let message = first_message(&api, &account.id);
+        save_test_ai_settings(&api);
+
+        api.run_ai_analysis(message.id.clone()).await.unwrap();
+
+        let inputs = captured.lock();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].message_id, message.id);
+        assert_eq!(inputs[0].subject, message.subject);
+        assert_eq!(inputs[0].body, message.body);
     }
 
     #[tokio::test]
@@ -1550,6 +1621,23 @@ mod tests {
             todos: vec!["Reply before 18:00".to_string()],
             reply_draft: "Acknowledged.".to_string(),
             raw_json: "{\"summary\":\"Short summary\"}".to_string(),
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingAiProvider {
+        inputs: Arc<Mutex<Vec<AiAnalysisInput>>>,
+    }
+
+    #[async_trait]
+    impl AiProvider for RecordingAiProvider {
+        async fn analyze_mail(
+            &self,
+            _settings: &AiSettings,
+            input: &AiAnalysisInput,
+        ) -> Result<AiInsightPayload, AiRemoteError> {
+            self.inputs.lock().push(input.clone());
+            Ok(ai_payload())
         }
     }
 

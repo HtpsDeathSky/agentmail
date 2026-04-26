@@ -160,6 +160,9 @@ impl MailStore {
               FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
             );
 
+            CREATE INDEX IF NOT EXISTS idx_ai_insights_message_kind_created
+              ON ai_insights(message_id, kind, created_at DESC);
+
             CREATE TABLE IF NOT EXISTS ai_audits (
               id TEXT PRIMARY KEY,
               message_id TEXT NOT NULL,
@@ -211,6 +214,12 @@ impl MailStore {
             "#,
         )?;
         ensure_ai_insights_message_fk(&mut conn)?;
+        conn.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_ai_insights_message_kind_created
+              ON ai_insights(message_id, kind, created_at DESC);
+            "#,
+        )?;
         ensure_column(
             &conn,
             "sync_states",
@@ -1516,6 +1525,31 @@ mod tests {
         assert_eq!(rows[0].priority, AiPriority::High);
         assert_eq!(rows[0].todos, vec!["Reply before 18:00".to_string()]);
         assert!(store.list_ai_insights("other-message").unwrap().is_empty());
+    }
+
+    #[test]
+    fn ai_insights_have_message_kind_created_index() {
+        let store = MailStore::memory().unwrap();
+        let conn = store.conn.lock();
+        let mut index_stmt = conn.prepare("PRAGMA index_list(ai_insights)").unwrap();
+        let index_names = index_stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(index_names
+            .iter()
+            .any(|name| name == "idx_ai_insights_message_kind_created"));
+
+        let mut column_stmt = conn
+            .prepare("PRAGMA index_info(idx_ai_insights_message_kind_created)")
+            .unwrap();
+        let columns = column_stmt
+            .query_map([], |row| row.get::<_, String>(2))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(columns, vec!["message_id", "kind", "created_at"]);
     }
 
     #[test]

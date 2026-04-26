@@ -224,8 +224,18 @@ const actionResult = (kind: MailActionResult["kind"], pendingActionId?: string):
 
 const maskApiKey = (apiKey: string) => {
   const codePoints = Array.from(apiKey.trim());
-  if (codePoints.length <= 4) return "****";
+  if (codePoints.length <= 8) return "****";
   return `${codePoints.slice(0, 3).join("")}...${codePoints.slice(-4).join("")}`;
+};
+
+const validateAiBaseUrl = (baseUrl: string) => {
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl.trim());
+  } catch {
+    throw new Error("base_url must be a valid https URL");
+  }
+  if (parsed.protocol !== "https:") throw new Error("base_url must use https");
 };
 
 export const demoBackend = {
@@ -399,6 +409,7 @@ export const demoBackend = {
         return aiSettings;
       case "save_ai_settings": {
         const request = args?.request as SaveAiSettingsRequest;
+        validateAiBaseUrl(request.base_url);
         const apiKey = request.api_key?.trim() ?? "";
         const apiKeyMask = apiKey ? maskApiKey(apiKey) : aiSettings?.api_key_mask;
         if (!apiKeyMask) throw new Error("api_key is required");

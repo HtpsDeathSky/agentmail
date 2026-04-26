@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use mail_core::{AiAnalysisInput, AiInsightPayload, AiSettings};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
@@ -224,10 +225,30 @@ fn validate_settings(settings: &AiSettings) -> AiRemoteResult<()> {
     }
 
     if missing.is_empty() {
-        Ok(())
+        validate_remote_base_url(&settings.base_url)
     } else {
         Err(AiRemoteError::InvalidSettings(missing.join(", ")))
     }
+}
+
+pub fn validate_remote_base_url(base_url: &str) -> AiRemoteResult<()> {
+    let parsed = Url::parse(base_url.trim()).map_err(|_| {
+        AiRemoteError::InvalidSettings("base_url must be a valid https URL".to_string())
+    })?;
+
+    if parsed.scheme() != "https" {
+        return Err(AiRemoteError::InvalidSettings(
+            "base_url must use https".to_string(),
+        ));
+    }
+
+    if parsed.host_str().is_none() {
+        return Err(AiRemoteError::InvalidSettings(
+            "base_url must include a host".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn build_user_prompt(input: &AiAnalysisInput) -> AiRemoteResult<String> {
@@ -365,6 +386,18 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(AiRemoteError::Disabled)));
+    }
+
+    #[test]
+    fn cleartext_remote_base_url_is_rejected() {
+        let mut settings = settings();
+        settings.base_url = "http://api.example.com/v1".to_string();
+
+        let result = validate_settings(&settings);
+
+        assert!(
+            matches!(result, Err(AiRemoteError::InvalidSettings(message)) if message.contains("https"))
+        );
     }
 
     #[test]
