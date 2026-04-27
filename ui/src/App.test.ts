@@ -1,11 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  applyThemeModeToDocument,
   formatAuditLine,
   formatFolderCount,
   formatSendQueuedStatus,
+  getNextThemeMode,
+  readStoredThemeMode,
   refreshAfterMailSyncEvent,
   runAutomaticAccountSync,
-  runInitialAccountSync
+  runInitialAccountSync,
+  THEME_MODE_STORAGE_KEY
 } from "./App";
 
 describe("formatFolderCount", () => {
@@ -39,6 +43,28 @@ describe("formatAuditLine", () => {
         created_at: "2026-04-27T07:30:00Z"
       })
     ).toContain("SMTP authentication rejected by provider");
+  });
+});
+
+describe("theme mode helpers", () => {
+  it("defaults to dark mode when no saved preference exists", () => {
+    window.localStorage.removeItem(THEME_MODE_STORAGE_KEY);
+
+    expect(readStoredThemeMode(window.localStorage)).toBe("dark");
+  });
+
+  it("toggles between dark and light modes", () => {
+    expect(getNextThemeMode("dark")).toBe("light");
+    expect(getNextThemeMode("light")).toBe("dark");
+  });
+
+  it("persists and applies light mode to the document root", () => {
+    window.localStorage.removeItem(THEME_MODE_STORAGE_KEY);
+
+    applyThemeModeToDocument(document.documentElement, window.localStorage, "light");
+
+    expect(window.localStorage.getItem(THEME_MODE_STORAGE_KEY)).toBe("light");
+    expect(document.documentElement.dataset.theme).toBe("light");
   });
 });
 

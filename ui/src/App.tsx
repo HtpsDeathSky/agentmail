@@ -9,6 +9,7 @@ import {
   Inbox,
   Mail,
   MailPlus,
+  Moon,
   PanelRight,
   RefreshCcw,
   Search,
@@ -16,6 +17,7 @@ import {
   Settings,
   ShieldCheck,
   Star,
+  Sun,
   TerminalSquare,
   Trash2,
   X
@@ -56,6 +58,9 @@ const defaultAccountConfigForm: SaveAccountConfigRequest = {
 
 export const MAIL_SYNC_EVENT = "agentmail-mail-sync";
 export const AUTO_SYNC_INTERVAL_MS = 30_000;
+export const THEME_MODE_STORAGE_KEY = "agentmail-theme-mode";
+
+export type ThemeMode = "dark" | "light";
 
 export type MailSyncEventPayload = {
   account_id: string;
@@ -101,6 +106,32 @@ export function formatSendQueuedStatus(recipients: string[]) {
 export function formatAuditLine(audit: MailActionAudit) {
   const base = `[${formatTime(audit.created_at)}] ${actionLabels[audit.action] ?? audit.action}:${audit.status}`;
   return audit.error_message ? `${base} / ${audit.error_message}` : base;
+}
+
+export function readStoredThemeMode(storage: Pick<Storage, "getItem"> | null | undefined): ThemeMode {
+  try {
+    return storage?.getItem(THEME_MODE_STORAGE_KEY) === "light" ? "light" : "dark";
+  } catch {
+    return "dark";
+  }
+}
+
+export function getNextThemeMode(mode: ThemeMode): ThemeMode {
+  return mode === "dark" ? "light" : "dark";
+}
+
+export function applyThemeModeToDocument(
+  root: Pick<HTMLElement, "dataset" | "style">,
+  storage: Pick<Storage, "setItem"> | null | undefined,
+  mode: ThemeMode
+) {
+  root.dataset.theme = mode;
+  root.style.colorScheme = mode;
+  try {
+    storage?.setItem(THEME_MODE_STORAGE_KEY, mode);
+  } catch {
+    // Storage can be unavailable in hardened desktop/webview contexts.
+  }
 }
 
 type InitialAccountSyncRequest = {
@@ -275,6 +306,9 @@ export function App() {
   const [isAnalyzing, setAnalyzing] = useState(false);
   const [isActionRunning, setActionRunning] = useState(false);
   const [aiStatus, setAiStatus] = useState("ai link idle");
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() =>
+    typeof window === "undefined" ? "dark" : readStoredThemeMode(window.localStorage)
+  );
   const [isPending, startTransition] = useTransition();
   const messagesRef = useRef<MailMessage[]>([]);
   const selectedAccountIdRef = useRef<string | null>(null);
@@ -283,6 +317,11 @@ export function App() {
   const selectedMessageIdRef = useRef<string | null>(null);
   const isAutoSyncRunningRef = useRef(false);
   const queryRef = useRef("");
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    applyThemeModeToDocument(document.documentElement, typeof window === "undefined" ? null : window.localStorage, themeMode);
+  }, [themeMode]);
 
   const selectedAccount = useMemo(
     () => accounts.find((account) => account.id === selectedAccountId) ?? null,
@@ -867,6 +906,8 @@ export function App() {
           accounts={accounts}
           selectedAccountId={selectedAccountId}
           settings={aiSettings}
+          themeMode={themeMode}
+          onThemeModeChange={setThemeMode}
           onClose={() => setConfigOpen(false)}
           onAccountSaved={handleAccountConfigSaved}
           onAiSettingsSaved={refreshAiSettings}
@@ -950,12 +991,14 @@ interface ConfigurationModalProps {
   accounts: MailAccount[];
   selectedAccountId: string | null;
   settings: AiSettingsView | null;
+  themeMode: ThemeMode;
+  onThemeModeChange: (mode: ThemeMode) => void;
   onClose: () => void;
   onAccountSaved: (account: MailAccount) => Promise<void>;
   onAiSettingsSaved: () => Promise<void>;
 }
 
-type ConfigTab = "accounts" | "ai";
+type ConfigTab = "accounts" | "ai" | "display";
 
 function accountConfigToForm(config: AccountConfigView): SaveAccountConfigRequest {
   return {
@@ -973,7 +1016,16 @@ function accountConfigToForm(config: AccountConfigView): SaveAccountConfigReques
   };
 }
 
-function ConfigurationModal({ accounts, selectedAccountId, settings, onClose, onAccountSaved, onAiSettingsSaved }: ConfigurationModalProps) {
+function ConfigurationModal({
+  accounts,
+  selectedAccountId,
+  settings,
+  themeMode,
+  onThemeModeChange,
+  onClose,
+  onAccountSaved,
+  onAiSettingsSaved
+}: ConfigurationModalProps) {
   const [activeTab, setActiveTab] = useState<ConfigTab>("accounts");
   const [selectedId, setSelectedId] = useState<string | null>(selectedAccountId ?? accounts[0]?.id ?? null);
   const [accountForm, setAccountForm] = useState<SaveAccountConfigRequest>({ ...defaultAccountConfigForm });
@@ -1118,6 +1170,9 @@ function ConfigurationModal({ accounts, selectedAccountId, settings, onClose, on
           <button className={activeTab === "ai" ? "active" : ""} type="button" onClick={() => setActiveTab("ai")}>
             AI MODEL
           </button>
+          <button className={activeTab === "display" ? "active" : ""} type="button" onClick={() => setActiveTab("display")}>
+            DISPLAY
+          </button>
         </div>
 
         {activeTab === "accounts" ? (
@@ -1190,7 +1245,7 @@ function ConfigurationModal({ accounts, selectedAccountId, settings, onClose, on
               </footer>
             </section>
           </form>
-        ) : (
+        ) : activeTab === "ai" ? (
           <form className="config-ai-form" onSubmit={submitAi}>
             <label>
               Provider
@@ -1227,6 +1282,30 @@ function ConfigurationModal({ accounts, selectedAccountId, settings, onClose, on
               </button>
             </footer>
           </form>
+        ) : (
+          <section className="config-display-panel">
+            <div className="theme-switch-row">
+              <div>
+                <span>DISPLAY MODE</span>
+                <strong>{themeMode === "dark" ? "DARK INDUSTRIAL" : "ARCHIVE BEIGE"}</strong>
+              </div>
+              <button
+                type="button"
+                onClick={() => onThemeModeChange(getNextThemeMode(themeMode))}
+                aria-pressed={themeMode === "light"}
+                title={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+              >
+                {themeMode === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+                {themeMode === "dark" ? "LIGHT" : "DARK"}
+              </button>
+            </div>
+            <div className="theme-swatch-grid" aria-label="Theme color preview">
+              <span className="theme-swatch swatch-surface" />
+              <span className="theme-swatch swatch-panel" />
+              <span className="theme-swatch swatch-accent" />
+              <span className="theme-swatch swatch-danger" />
+            </div>
+          </section>
         )}
       </section>
     </div>
