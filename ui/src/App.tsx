@@ -55,6 +55,7 @@ const defaultAccountConfigForm: SaveAccountConfigRequest = {
 };
 
 export const MAIL_SYNC_EVENT = "agentmail-mail-sync";
+export const AUTO_SYNC_INTERVAL_MS = 30_000;
 
 export type MailSyncEventPayload = {
   account_id: string;
@@ -206,6 +207,54 @@ export async function refreshAfterMailSyncEvent({
   return true;
 }
 
+type AutomaticAccountSyncRequest = {
+  selectedAccountId: string | null;
+  selectedFolderId: string | null;
+  query: string;
+  syncEnabled?: boolean;
+  syncAccount: (accountId: string) => Promise<SyncSummary>;
+  startAccountWatchers?: (accountId: string) => Promise<unknown>;
+  refreshFolders: (accountId: string) => Promise<void>;
+  refreshMessages: (accountId: string, folderId: string | null, query: string) => Promise<void>;
+  refreshSyncState: (accountId: string) => Promise<void>;
+  refreshAudits: () => Promise<void>;
+  refreshPendingActions: (accountId: string) => Promise<void>;
+};
+
+export async function runAutomaticAccountSync({
+  selectedAccountId,
+  selectedFolderId,
+  query,
+  syncEnabled = true,
+  syncAccount,
+  startAccountWatchers,
+  refreshFolders,
+  refreshMessages,
+  refreshSyncState,
+  refreshAudits,
+  refreshPendingActions
+}: AutomaticAccountSyncRequest) {
+  if (!selectedAccountId || !syncEnabled) {
+    return { refreshed: false, status: null };
+  }
+
+  const summary = await syncAccount(selectedAccountId);
+  if (startAccountWatchers) {
+    await startAccountWatchers(selectedAccountId).catch(() => undefined);
+  }
+  await Promise.allSettled([
+    refreshFolders(selectedAccountId),
+    refreshMessages(selectedAccountId, selectedFolderId, query),
+    refreshSyncState(selectedAccountId),
+    refreshAudits(),
+    refreshPendingActions(selectedAccountId)
+  ]);
+  return {
+    refreshed: true,
+    status: `auto sync complete: ${summary.folders} folders / ${summary.messages} messages`
+  };
+}
+
 export function App() {
   const [accounts, setAccounts] = useState<MailAccount[]>([]);
   const [folders, setFolders] = useState<MailFolder[]>([]);
@@ -229,8 +278,10 @@ export function App() {
   const [isPending, startTransition] = useTransition();
   const messagesRef = useRef<MailMessage[]>([]);
   const selectedAccountIdRef = useRef<string | null>(null);
+  const selectedAccountSyncEnabledRef = useRef(true);
   const selectedFolderIdRef = useRef<string | null>(null);
   const selectedMessageIdRef = useRef<string | null>(null);
+  const isAutoSyncRunningRef = useRef(false);
   const queryRef = useRef("");
 
   const selectedAccount = useMemo(
@@ -324,6 +375,10 @@ export function App() {
   }, [selectedAccountId]);
 
   useEffect(() => {
+    selectedAccountSyncEnabledRef.current = selectedAccount?.sync_enabled ?? true;
+  }, [selectedAccount?.sync_enabled]);
+
+  useEffect(() => {
     selectedFolderIdRef.current = selectedFolderId;
   }, [selectedFolderId]);
 
@@ -369,6 +424,36 @@ export function App() {
       isCancelled = true;
       unlisten?.();
     };
+  }, [refreshAudits, refreshFolders, refreshMessages, refreshPendingActions, refreshSyncState]);
+
+  useEffect(() => {
+    const runAutoSync = () => {
+      if (isAutoSyncRunningRef.current) return;
+      isAutoSyncRunningRef.current = true;
+      void runAutomaticAccountSync({
+        selectedAccountId: selectedAccountIdRef.current,
+        selectedFolderId: selectedFolderIdRef.current,
+        query: queryRef.current,
+        syncEnabled: selectedAccountSyncEnabledRef.current,
+        syncAccount: api.syncAccount,
+        startAccountWatchers: api.startAccountWatchers,
+        refreshFolders,
+        refreshMessages,
+        refreshSyncState,
+        refreshAudits,
+        refreshPendingActions
+      })
+        .then((result) => {
+          if (result.status) setStatus(result.status);
+        })
+        .catch((error) => setStatus(`auto sync failed: ${String(error)}`))
+        .finally(() => {
+          isAutoSyncRunningRef.current = false;
+        });
+    };
+
+    const intervalId = window.setInterval(runAutoSync, AUTO_SYNC_INTERVAL_MS);
+    return () => window.clearInterval(intervalId);
   }, [refreshAudits, refreshFolders, refreshMessages, refreshPendingActions, refreshSyncState]);
 
   useEffect(() => {

@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { formatAuditLine, formatFolderCount, formatSendQueuedStatus, refreshAfterMailSyncEvent, runInitialAccountSync } from "./App";
+import {
+  formatAuditLine,
+  formatFolderCount,
+  formatSendQueuedStatus,
+  refreshAfterMailSyncEvent,
+  runAutomaticAccountSync,
+  runInitialAccountSync
+} from "./App";
 
 describe("formatFolderCount", () => {
   it("shows total count when no messages are unread", () => {
@@ -222,6 +229,79 @@ describe("refreshAfterMailSyncEvent", () => {
     });
 
     expect(didRefresh).toBe(false);
+    expect(refreshFolders).not.toHaveBeenCalled();
+    expect(refreshMessages).not.toHaveBeenCalled();
+    expect(refreshSyncState).not.toHaveBeenCalled();
+    expect(refreshAudits).not.toHaveBeenCalled();
+    expect(refreshPendingActions).not.toHaveBeenCalled();
+  });
+});
+
+describe("runAutomaticAccountSync", () => {
+  it("syncs and refreshes the visible account even when watcher startup is unavailable", async () => {
+    const syncAccount = vi.fn().mockResolvedValue({
+      account_id: "acct-1",
+      folders: 4,
+      messages: 19,
+      synced_at: "2026-04-27T00:01:00Z"
+    });
+    const startAccountWatchers = vi.fn().mockRejectedValue(new Error("IDLE unavailable"));
+    const refreshFolders = vi.fn().mockResolvedValue(undefined);
+    const refreshMessages = vi.fn().mockResolvedValue(undefined);
+    const refreshSyncState = vi.fn().mockResolvedValue(undefined);
+    const refreshAudits = vi.fn().mockResolvedValue(undefined);
+    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
+
+    const result = await runAutomaticAccountSync({
+      selectedAccountId: "acct-1",
+      selectedFolderId: "acct-1:inbox",
+      query: "",
+      syncAccount,
+      startAccountWatchers,
+      refreshFolders,
+      refreshMessages,
+      refreshSyncState,
+      refreshAudits,
+      refreshPendingActions
+    });
+
+    expect(result).toEqual({ refreshed: true, status: "auto sync complete: 4 folders / 19 messages" });
+    expect(syncAccount).toHaveBeenCalledWith("acct-1");
+    expect(startAccountWatchers).toHaveBeenCalledWith("acct-1");
+    expect(refreshFolders).toHaveBeenCalledWith("acct-1");
+    expect(refreshMessages).toHaveBeenCalledWith("acct-1", "acct-1:inbox", "");
+    expect(refreshSyncState).toHaveBeenCalledWith("acct-1");
+    expect(refreshAudits).toHaveBeenCalled();
+    expect(refreshPendingActions).toHaveBeenCalledWith("acct-1");
+  });
+
+  it("does nothing when no account is selected", async () => {
+    const syncAccount = vi.fn().mockResolvedValue({
+      account_id: "acct-1",
+      folders: 4,
+      messages: 19,
+      synced_at: "2026-04-27T00:01:00Z"
+    });
+    const refreshFolders = vi.fn().mockResolvedValue(undefined);
+    const refreshMessages = vi.fn().mockResolvedValue(undefined);
+    const refreshSyncState = vi.fn().mockResolvedValue(undefined);
+    const refreshAudits = vi.fn().mockResolvedValue(undefined);
+    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
+
+    const result = await runAutomaticAccountSync({
+      selectedAccountId: null,
+      selectedFolderId: null,
+      query: "",
+      syncAccount,
+      refreshFolders,
+      refreshMessages,
+      refreshSyncState,
+      refreshAudits,
+      refreshPendingActions
+    });
+
+    expect(result).toEqual({ refreshed: false, status: null });
+    expect(syncAccount).not.toHaveBeenCalled();
     expect(refreshFolders).not.toHaveBeenCalled();
     expect(refreshMessages).not.toHaveBeenCalled();
     expect(refreshSyncState).not.toHaveBeenCalled();
