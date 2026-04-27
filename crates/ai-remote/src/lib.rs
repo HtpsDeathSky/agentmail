@@ -171,14 +171,15 @@ impl Clone for AiRemoteError {
     }
 }
 
-const SYSTEM_PROMPT: &str = r#"You analyze email for a local mail client.
-Return only a valid JSON object with these fields:
-summary: string
-category: string
+const SYSTEM_PROMPT: &str = r#"你是本地邮件客户端的邮件分析助手。
+只返回一个有效 JSON 对象，不要返回 Markdown、解释文字或额外字段。
+所有可读文本字段必须使用简体中文。
+字段要求:
+summary: string，1 句精简中文摘要，不超过 80 个中文字，直接说明邮件核心事项。
+category: string，简短中文分类词，例如“运维”“财务”“会议”“一般”。
 priority: one of "low", "normal", "high", "urgent"
-todos: array of strings
-reply_draft: string
-Do not include markdown, prose, or extra fields."#;
+todos: array of strings，仅列出邮件明确要求的行动项；没有明确行动项时返回 []。
+reply_draft: string，仅当邮件明显需要回复时生成简短中文回复草稿，否则返回 ""。"#;
 
 #[derive(Serialize)]
 struct ChatCompletionRequest<'a> {
@@ -343,6 +344,15 @@ mod tests {
                 local_path: None,
             }],
         }
+    }
+
+    #[test]
+    fn system_prompt_requires_concise_simplified_chinese_json() {
+        assert!(SYSTEM_PROMPT.contains("简体中文"));
+        assert!(SYSTEM_PROMPT.contains("精简"));
+        assert!(SYSTEM_PROMPT.contains("80"));
+        assert!(SYSTEM_PROMPT.contains("JSON"));
+        assert!(SYSTEM_PROMPT.contains("summary"));
     }
 
     #[tokio::test]

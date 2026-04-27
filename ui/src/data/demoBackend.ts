@@ -433,13 +433,17 @@ export const demoBackend = {
 
         const hasAction = /\b(action|required|confirm|waiting|before|tonight)\b/i.test(`${message.subject} ${message.body_preview}`);
         const priority: AiPriority = hasAction ? "high" : "normal";
-        const todo = hasAction ? `Review and respond to "${message.subject}".` : `Read "${message.subject}" and file any follow-up.`;
+        const summary = hasAction
+          ? "需要在截止时间前确认相关负责人和例外事项。"
+          : message.attachments.length > 0
+            ? "邮件包含待核对附件，请按需查看处理。"
+            : "邮件内容已整理，可按需阅读归档。";
         const payload = {
-          summary: `${message.subject}: ${message.body_preview}`,
-          category: message.attachments.length > 0 ? "finance" : hasAction ? "operations" : "general",
+          summary,
+          category: message.attachments.length > 0 ? "财务" : hasAction ? "运维" : "一般",
           priority,
-          todos: [todo],
-          reply_draft: `Thanks for the update on "${message.subject}". I will review and follow up shortly.`
+          todos: hasAction ? ["确认邮件要求的事项并及时回复。"] : [],
+          reply_draft: hasAction ? "已收到，我会在截止时间前确认并回复。" : ""
         };
         const insight: AiInsight = {
           id: `demo-ai-${message.id}-${aiInsights.filter((item) => item.message_id === message.id).length + 1}`,
