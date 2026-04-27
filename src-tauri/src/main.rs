@@ -1,9 +1,12 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use std::sync::Arc;
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 use app_api::{
-    AccountConfigView, AddAccountRequest, AppApi, SaveAccountConfigRequest, SyncSummary,
+    AccountConfigView, AddAccountRequest, ApiError, AppApi, SaveAccountConfigRequest, SyncSummary,
     TestConnectionRequest,
 };
 use mail_core::{
@@ -15,6 +18,11 @@ use tauri::{Manager, State};
 
 struct ApiState {
     api: Arc<AppApi>,
+}
+
+#[derive(Clone, Default)]
+struct WatcherRegistry {
+    active: Arc<Mutex<HashSet<String>>>,
 }
 
 #[tauri::command]
@@ -68,6 +76,15 @@ async fn sync_account(
     account_id: String,
 ) -> Result<SyncSummary, String> {
     state.api.sync_account(account_id).await.map_err(to_error)
+}
+
+#[tauri::command]
+fn start_account_watchers(
+    state: State<'_, ApiState>,
+    registry: State<'_, WatcherRegistry>,
+    account_id: String,
+) -> Result<(), String> {
+    start_account_watchers_for_api(Arc::clone(&state.api), registry.inner().clone(), account_id)
 }
 
 #[tauri::command]
@@ -196,6 +213,107 @@ fn to_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
+fn watcher_key(account_id: &str, folder_id: &str) -> String {
+    format!("{account_id}\0{folder_id}")
+}
+
+fn register_watcher(registry: &WatcherRegistry, account_id: &str, folder_id: &str) -> bool {
+    let key = watcher_key(account_id, folder_id);
+    match registry.active.lock() {
+        Ok(mut active) => active.insert(key),
+        Err(_) => false,
+    }
+}
+
+fn remove_watcher(registry: &WatcherRegistry, account_id: &str, folder_id: &str) {
+    let key = watcher_key(account_id, folder_id);
+    if let Ok(mut active) = registry.active.lock() {
+        active.remove(&key);
+    }
+}
+
+fn start_account_watchers_for_api(
+    api: Arc<AppApi>,
+    registry: WatcherRegistry,
+    account_id: String,
+) -> Result<(), String> {
+    if !api.is_account_sync_enabled(&account_id).map_err(to_error)? {
+        return Ok(());
+    }
+
+    let folders = api.list_folders(account_id.clone()).map_err(to_error)?;
+    for folder in folders {
+        start_folder_watcher(
+            Arc::clone(&api),
+            registry.clone(),
+            account_id.clone(),
+            folder.id,
+        );
+    }
+    Ok(())
+}
+
+fn start_folder_watcher(
+    api: Arc<AppApi>,
+    registry: WatcherRegistry,
+    account_id: String,
+    folder_id: String,
+) {
+    if !register_watcher(&registry, &account_id, &folder_id) {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match api.is_account_sync_enabled(&account_id) {
+                Ok(true) => {}
+                Ok(false) | Err(_) => {
+                    remove_watcher(&registry, &account_id, &folder_id);
+                    return;
+                }
+            }
+
+            match api
+                .watch_folder_until_change(account_id.clone(), folder_id.clone())
+                .await
+            {
+                Ok(mail_core::FolderWatchOutcome::Changed) => {
+                    match api.is_account_sync_enabled(&account_id) {
+                        Ok(true) => {}
+                        Ok(false) | Err(_) => {
+                            remove_watcher(&registry, &account_id, &folder_id);
+                            return;
+                        }
+                    }
+
+                    match api.sync_account(account_id.clone()).await {
+                        Ok(_) | Err(ApiError::SyncAlreadyRunning(_)) => {}
+                        Err(_) => {
+                            remove_watcher(&registry, &account_id, &folder_id);
+                            return;
+                        }
+                    }
+                    if start_account_watchers_for_api(
+                        Arc::clone(&api),
+                        registry.clone(),
+                        account_id.clone(),
+                    )
+                    .is_err()
+                    {
+                        remove_watcher(&registry, &account_id, &folder_id);
+                        return;
+                    }
+                }
+                Ok(mail_core::FolderWatchOutcome::Timeout) => {}
+                Err(_) => {
+                    remove_watcher(&registry, &account_id, &folder_id);
+                    return;
+                }
+            }
+        }
+    });
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -210,13 +328,22 @@ fn main() {
             let api = AppApi::new_default(db_path)
                 .map_err(|err| format!("failed to initialize backend: {err}"))?;
             let api = Arc::new(api);
+            let watcher_registry = WatcherRegistry::default();
             app.manage(ApiState {
                 api: Arc::clone(&api),
             });
+            app.manage(watcher_registry.clone());
             tauri::async_runtime::spawn(async move {
                 if let Ok(accounts) = api.list_accounts() {
                     for account in accounts.into_iter().filter(|account| account.sync_enabled) {
-                        let _ = api.sync_account(account.id).await;
+                        let account_id = account.id;
+                        if api.sync_account(account_id.clone()).await.is_ok() {
+                            let _ = start_account_watchers_for_api(
+                                Arc::clone(&api),
+                                watcher_registry.clone(),
+                                account_id,
+                            );
+                        }
                     }
                 }
             });
@@ -229,6 +356,7 @@ fn main() {
             get_account_config,
             save_account_config,
             sync_account,
+            start_account_watchers,
             get_sync_status,
             list_folders,
             list_messages,

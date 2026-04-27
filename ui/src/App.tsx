@@ -35,7 +35,8 @@ import {
   SaveAccountConfigRequest,
   SaveAiSettingsRequest,
   SendMessageDraft,
-  SyncState
+  SyncState,
+  SyncSummary
 } from "./api";
 
 const defaultAccountConfigForm: SaveAccountConfigRequest = {
@@ -89,6 +90,73 @@ export function formatSendQueuedStatus(recipients: string[]) {
 export function formatAuditLine(audit: MailActionAudit) {
   const base = `[${formatTime(audit.created_at)}] ${actionLabels[audit.action] ?? audit.action}:${audit.status}`;
   return audit.error_message ? `${base} / ${audit.error_message}` : base;
+}
+
+type InitialAccountSyncRequest = {
+  accountId: string;
+  email: string;
+  syncEnabled?: boolean;
+  folderId: string | null;
+  query: string;
+  syncAccount: (accountId: string) => Promise<SyncSummary>;
+  startAccountWatchers?: (accountId: string) => Promise<unknown>;
+  refreshFolders: (accountId: string) => Promise<void>;
+  refreshMessages: (accountId: string, folderId: string | null, query: string) => Promise<void>;
+  refreshSyncState: (accountId: string) => Promise<void>;
+  refreshAudits: () => Promise<void>;
+  refreshPendingActions: (accountId: string) => Promise<void>;
+};
+
+export async function runInitialAccountSync({
+  accountId,
+  email,
+  syncEnabled = true,
+  folderId,
+  query,
+  syncAccount,
+  startAccountWatchers,
+  refreshFolders,
+  refreshMessages,
+  refreshSyncState,
+  refreshAudits,
+  refreshPendingActions
+}: InitialAccountSyncRequest) {
+  if (!syncEnabled) {
+    await Promise.allSettled([
+      refreshFolders(accountId),
+      refreshMessages(accountId, folderId, query),
+      refreshSyncState(accountId),
+      refreshAudits(),
+      refreshPendingActions(accountId)
+    ]);
+    return `account configuration saved: ${email}`;
+  }
+
+  let summary: SyncSummary | null = null;
+  let syncError: unknown = null;
+
+  try {
+    summary = await syncAccount(accountId);
+  } catch (error) {
+    syncError = error;
+  }
+
+  if (summary && startAccountWatchers) {
+    await startAccountWatchers(accountId).catch(() => undefined);
+  }
+
+  await Promise.allSettled([
+    refreshFolders(accountId),
+    refreshMessages(accountId, folderId, query),
+    refreshSyncState(accountId),
+    refreshAudits(),
+    refreshPendingActions(accountId)
+  ]);
+
+  if (summary) {
+    return `account saved and initial sync complete: ${email} / ${summary.folders} folders / ${summary.messages} messages`;
+  }
+  return `account saved, but initial sync failed: ${String(syncError)}`;
 }
 
 export function App() {
@@ -303,12 +371,26 @@ export function App() {
     async (account: MailAccount) => {
       setAccounts((current) => [account, ...current.filter((item) => item.id !== account.id)]);
       setSelectedAccountId(account.id);
-      await refreshFolders(account.id);
-      await refreshMessages(account.id, null, query);
-      await refreshSyncState(account.id);
-      await refreshAudits();
-      await refreshPendingActions(account.id);
-      setStatus(`account configuration saved: ${account.email}`);
+      setStatus(
+        account.sync_enabled
+          ? `account configuration saved, initial sync starting: ${account.email}`
+          : `account configuration saved: ${account.email}`
+      );
+      const nextStatus = await runInitialAccountSync({
+        accountId: account.id,
+        email: account.email,
+        syncEnabled: account.sync_enabled,
+        folderId: null,
+        query,
+        syncAccount: api.syncAccount,
+        startAccountWatchers: api.startAccountWatchers,
+        refreshFolders,
+        refreshMessages,
+        refreshSyncState,
+        refreshAudits,
+        refreshPendingActions
+      });
+      setStatus(nextStatus);
     },
     [query, refreshAudits, refreshFolders, refreshMessages, refreshPendingActions, refreshSyncState]
   );

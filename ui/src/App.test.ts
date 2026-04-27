@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { formatAuditLine, formatFolderCount, formatSendQueuedStatus } from "./App";
+import { describe, expect, it, vi } from "vitest";
+import { formatAuditLine, formatFolderCount, formatSendQueuedStatus, runInitialAccountSync } from "./App";
 
 describe("formatFolderCount", () => {
   it("shows total count when no messages are unread", () => {
@@ -32,5 +32,144 @@ describe("formatAuditLine", () => {
         created_at: "2026-04-27T07:30:00Z"
       })
     ).toContain("SMTP authentication rejected by provider");
+  });
+});
+
+describe("runInitialAccountSync", () => {
+  it("syncs a saved account, refreshes observable state, starts watchers, and returns a useful status", async () => {
+    const refreshFolders = vi.fn().mockResolvedValue(undefined);
+    const refreshMessages = vi.fn().mockResolvedValue(undefined);
+    const refreshSyncState = vi.fn().mockResolvedValue(undefined);
+    const refreshAudits = vi.fn().mockResolvedValue(undefined);
+    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
+    const startAccountWatchers = vi.fn().mockResolvedValue(undefined);
+
+    const status = await runInitialAccountSync({
+      accountId: "acct-1",
+      email: "ops@example.com",
+      folderId: "previous-folder",
+      query: "release",
+      syncAccount: vi.fn().mockResolvedValue({
+        account_id: "acct-1",
+        folders: 4,
+        messages: 18,
+        synced_at: "2026-04-27T00:00:00Z"
+      }),
+      startAccountWatchers,
+      refreshFolders,
+      refreshMessages,
+      refreshSyncState,
+      refreshAudits,
+      refreshPendingActions
+    });
+
+    expect(refreshFolders).toHaveBeenCalledWith("acct-1");
+    expect(refreshMessages).toHaveBeenCalledWith("acct-1", "previous-folder", "release");
+    expect(refreshSyncState).toHaveBeenCalledWith("acct-1");
+    expect(refreshAudits).toHaveBeenCalled();
+    expect(refreshPendingActions).toHaveBeenCalledWith("acct-1");
+    expect(startAccountWatchers).toHaveBeenCalledWith("acct-1");
+    expect(status).toBe("account saved and initial sync complete: ops@example.com / 4 folders / 18 messages");
+  });
+
+  it("keeps the saved account path alive when watcher startup fails after a successful sync", async () => {
+    const refreshFolders = vi.fn().mockResolvedValue(undefined);
+    const refreshMessages = vi.fn().mockResolvedValue(undefined);
+    const refreshSyncState = vi.fn().mockResolvedValue(undefined);
+    const refreshAudits = vi.fn().mockResolvedValue(undefined);
+    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
+    const startAccountWatchers = vi.fn().mockRejectedValue(new Error("watch unavailable"));
+
+    const status = await runInitialAccountSync({
+      accountId: "acct-1",
+      email: "ops@example.com",
+      folderId: null,
+      query: "",
+      syncAccount: vi.fn().mockResolvedValue({
+        account_id: "acct-1",
+        folders: 4,
+        messages: 18,
+        synced_at: "2026-04-27T00:00:00Z"
+      }),
+      startAccountWatchers,
+      refreshFolders,
+      refreshMessages,
+      refreshSyncState,
+      refreshAudits,
+      refreshPendingActions
+    });
+
+    expect(startAccountWatchers).toHaveBeenCalledWith("acct-1");
+    expect(status).toBe("account saved and initial sync complete: ops@example.com / 4 folders / 18 messages");
+  });
+
+  it("keeps the saved account path alive when initial sync fails and skips watcher startup", async () => {
+    const refreshFolders = vi.fn().mockResolvedValue(undefined);
+    const refreshMessages = vi.fn().mockResolvedValue(undefined);
+    const refreshSyncState = vi.fn().mockResolvedValue(undefined);
+    const refreshAudits = vi.fn().mockResolvedValue(undefined);
+    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
+    const startAccountWatchers = vi.fn().mockResolvedValue(undefined);
+
+    const status = await runInitialAccountSync({
+      accountId: "acct-1",
+      email: "ops@example.com",
+      folderId: null,
+      query: "",
+      syncAccount: vi.fn().mockRejectedValue(new Error("IMAP login rejected")),
+      startAccountWatchers,
+      refreshFolders,
+      refreshMessages,
+      refreshSyncState,
+      refreshAudits,
+      refreshPendingActions
+    });
+
+    expect(refreshFolders).toHaveBeenCalledWith("acct-1");
+    expect(refreshMessages).toHaveBeenCalledWith("acct-1", null, "");
+    expect(refreshSyncState).toHaveBeenCalledWith("acct-1");
+    expect(refreshAudits).toHaveBeenCalled();
+    expect(refreshPendingActions).toHaveBeenCalledWith("acct-1");
+    expect(startAccountWatchers).not.toHaveBeenCalled();
+    expect(status).toBe("account saved, but initial sync failed: Error: IMAP login rejected");
+  });
+
+  it("does not sync or start watchers when a saved account has sync disabled", async () => {
+    const syncAccount = vi.fn().mockResolvedValue({
+      account_id: "acct-1",
+      folders: 4,
+      messages: 18,
+      synced_at: "2026-04-27T00:00:00Z"
+    });
+    const startAccountWatchers = vi.fn().mockResolvedValue(undefined);
+    const refreshFolders = vi.fn().mockResolvedValue(undefined);
+    const refreshMessages = vi.fn().mockResolvedValue(undefined);
+    const refreshSyncState = vi.fn().mockResolvedValue(undefined);
+    const refreshAudits = vi.fn().mockResolvedValue(undefined);
+    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
+
+    const status = await runInitialAccountSync({
+      accountId: "acct-1",
+      email: "ops@example.com",
+      syncEnabled: false,
+      folderId: null,
+      query: "",
+      syncAccount,
+      startAccountWatchers,
+      refreshFolders,
+      refreshMessages,
+      refreshSyncState,
+      refreshAudits,
+      refreshPendingActions
+    });
+
+    expect(syncAccount).not.toHaveBeenCalled();
+    expect(startAccountWatchers).not.toHaveBeenCalled();
+    expect(refreshFolders).toHaveBeenCalledWith("acct-1");
+    expect(refreshMessages).toHaveBeenCalledWith("acct-1", null, "");
+    expect(refreshSyncState).toHaveBeenCalledWith("acct-1");
+    expect(refreshAudits).toHaveBeenCalled();
+    expect(refreshPendingActions).toHaveBeenCalledWith("acct-1");
+    expect(status).toBe("account configuration saved: ops@example.com");
   });
 });

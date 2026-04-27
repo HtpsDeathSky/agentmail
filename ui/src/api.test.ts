@@ -68,4 +68,8 @@ describe("api demo AI bindings", () => {
     expect(insight.todos.every((todo) => /[\u4e00-\u9fff]/.test(todo))).toBe(true);
     expect(insight.reply_draft === "" || /[\u4e00-\u9fff]/.test(insight.reply_draft)).toBe(true);
   });
+
+  it("supports starting account watchers in the browser demo", async () => {
+    await expect(api.startAccountWatchers("demo-account")).resolves.toBeNull();
+  });
 });

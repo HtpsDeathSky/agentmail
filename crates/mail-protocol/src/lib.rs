@@ -1,5 +1,7 @@
 use std::collections::HashSet;
+use std::time::Duration;
 
+use async_imap::extensions::idle::IdleResponse;
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use lettre::message::Mailbox;
@@ -7,8 +9,8 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use mail_core::{
     new_id, now_rfc3339, rfc3339_from_unix_timestamp, AttachmentRef, ConnectionSettings,
-    ConnectionTestResult, FolderRole, MailAccount, MailActionKind, MailFolder, MailMessage,
-    MessageFetchRequest, MessageFlags, RemoteMailAction, SendMessageDraft,
+    ConnectionTestResult, FolderRole, FolderWatchOutcome, MailAccount, MailActionKind, MailFolder,
+    MailMessage, MessageFetchRequest, MessageFlags, RemoteMailAction, SendMessageDraft,
 };
 use mail_parser::{Address, HeaderName, HeaderValue, MessageParser, MimeHeaders};
 use thiserror::Error;
@@ -31,6 +33,8 @@ pub enum ProtocolError {
 }
 
 pub type ProtocolResult<T> = Result<T, ProtocolError>;
+
+const IMAP_IDLE_TIMEOUT: Duration = Duration::from_secs(29 * 60);
 
 #[async_trait]
 pub trait MailProtocol: Send + Sync {
@@ -65,6 +69,15 @@ pub trait MailProtocol: Send + Sync {
         account: &MailAccount,
         action: &RemoteMailAction,
     ) -> ProtocolResult<()>;
+
+    async fn watch_folder_until_change(
+        &self,
+        _settings: &ConnectionSettings,
+        _account: &MailAccount,
+        _folder: &MailFolder,
+    ) -> ProtocolResult<FolderWatchOutcome> {
+        Ok(FolderWatchOutcome::Timeout)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -331,6 +344,50 @@ impl MailProtocol for LiveMailProtocol {
 
         let _ = session.logout().await;
         Ok(())
+    }
+
+    async fn watch_folder_until_change(
+        &self,
+        settings: &ConnectionSettings,
+        _account: &MailAccount,
+        folder: &MailFolder,
+    ) -> ProtocolResult<FolderWatchOutcome> {
+        let mut session = login_imap(settings).await?;
+        let capabilities = session
+            .capabilities()
+            .await
+            .map_err(|err| ProtocolError::Fetch(sanitize_error(&err.to_string())))?;
+        if !capabilities.has_str("IDLE") {
+            let _ = session.logout().await;
+            return Err(ProtocolError::Unsupported(
+                "IMAP server does not advertise IDLE".to_string(),
+            ));
+        }
+
+        session
+            .select(&folder.path)
+            .await
+            .map_err(|err| ProtocolError::Fetch(sanitize_error(&err.to_string())))?;
+
+        let mut idle = session.idle();
+        idle.init()
+            .await
+            .map_err(|err| ProtocolError::Fetch(sanitize_error(&err.to_string())))?;
+        let response = {
+            let (wait, _interrupt) = idle.wait_with_timeout(IMAP_IDLE_TIMEOUT);
+            wait.await
+        }
+        .map_err(|err| ProtocolError::Fetch(sanitize_error(&err.to_string())))?;
+
+        let outcome = match response {
+            IdleResponse::NewData(_) => FolderWatchOutcome::Changed,
+            IdleResponse::Timeout | IdleResponse::ManualInterrupt => FolderWatchOutcome::Timeout,
+        };
+        if let Ok(mut session) = idle.done().await {
+            let _ = session.logout().await;
+        }
+
+        Ok(outcome)
     }
 }
 

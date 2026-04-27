@@ -215,6 +215,7 @@ type CommandMap = {
   get_account_config: AccountConfigView;
   save_account_config: MailAccount;
   sync_account: SyncSummary;
+  start_account_watchers: null;
   get_sync_status: SyncState[];
   list_folders: MailFolder[];
   list_messages: MailMessage[];
@@ -250,6 +251,7 @@ export const api = {
   getAccountConfig: (accountId: string) => call("get_account_config", { accountId }),
   saveAccountConfig: (request: SaveAccountConfigRequest) => call("save_account_config", { request }),
   syncAccount: (accountId: string) => call("sync_account", { accountId }),
+  startAccountWatchers: (accountId: string) => call("start_account_watchers", { accountId }),
   getSyncStatus: (accountId: string) => call("get_sync_status", { accountId }),
   listFolders: (accountId: string) => call("list_folders", { accountId }),
   listMessages: (query: MessageQuery) => call("list_messages", { query }),

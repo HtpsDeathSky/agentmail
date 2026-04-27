@@ -302,6 +302,13 @@ impl Default for MessageFetchRequest {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum FolderWatchOutcome {
+    Changed,
+    Timeout,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum AiPriority {
     Low,
     Normal,

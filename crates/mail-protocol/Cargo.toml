@@ -12,4 +12,4 @@ lettre = { version = "0.11", default-features = false, features = ["builder", "s
 mail-core = { path = "../mail-core" }
 mail-parser = "0.11"
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["net", "time"] }

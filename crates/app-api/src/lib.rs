@@ -6,10 +6,10 @@ use ai_remote::{validate_remote_base_url, AiProvider, OpenAiCompatibleProvider};
 use mail_core::{
     new_id, now_plus_seconds_rfc3339, now_rfc3339, timestamp_is_future, ActionAuditStatus,
     AiAnalysisInput, AiInsight, AiSettings, AiSettingsView, ConnectionSettings,
-    ConnectionTestResult, FolderRole, MailAccount, MailActionAudit, MailActionKind,
-    MailActionRequest, MailActionResult, MailActionResultKind, MailFolder, MailMessage,
-    MessageFetchRequest, MessageQuery, PendingActionStatus, PendingMailAction, RemoteMailAction,
-    SaveAiSettingsRequest, SendMessageDraft, SyncState, SyncStateKind,
+    ConnectionTestResult, FolderRole, FolderWatchOutcome, MailAccount, MailActionAudit,
+    MailActionKind, MailActionRequest, MailActionResult, MailActionResultKind, MailFolder,
+    MailMessage, MessageFetchRequest, MessageQuery, PendingActionStatus, PendingMailAction,
+    RemoteMailAction, SaveAiSettingsRequest, SendMessageDraft, SyncState, SyncStateKind,
 };
 use mail_protocol::{LiveMailProtocol, MailProtocol, ProtocolError};
 use mail_store::{MailStore, MessageFlagPatch, StoreError};
@@ -117,6 +117,10 @@ impl AppApi {
         Ok(self.store.list_accounts()?)
     }
 
+    pub fn is_account_sync_enabled(&self, account_id: &str) -> ApiResult<bool> {
+        Ok(self.store.get_account(account_id)?.sync_enabled)
+    }
+
     pub fn get_account_config(&self, account_id: String) -> ApiResult<AccountConfigView> {
         let account = self.store.get_account(&account_id)?;
         let password = self.store.get_account_password(&account.id)?;
@@ -128,15 +132,6 @@ impl AppApi {
         request: SaveAccountConfigRequest,
     ) -> ApiResult<MailAccount> {
         request.validate()?;
-
-        let settings = request.connection_settings(request.id.clone());
-        let connection_result = self.protocol.test_connection(&settings).await?;
-        if !connection_result.imap_ok || !connection_result.smtp_ok {
-            return Err(ApiError::InvalidRequest(format!(
-                "connection test failed: {}",
-                connection_result.message
-            )));
-        }
 
         let now = now_rfc3339();
         let existing = match request.id.as_deref() {
@@ -376,6 +371,82 @@ impl AppApi {
             last_uid,
             synced_at: now_rfc3339(),
         })
+    }
+
+    pub async fn watch_folder_until_change(
+        &self,
+        account_id: String,
+        folder_id: String,
+    ) -> ApiResult<FolderWatchOutcome> {
+        let account = self.store.get_account(&account_id)?;
+        let folder = self.store.get_folder(&folder_id)?;
+        if folder.account_id != account.id {
+            return Err(ApiError::InvalidRequest(
+                "folder belongs to a different account".to_string(),
+            ));
+        }
+
+        let settings = self.connection_settings_for_account(&account)?;
+        let previous_state = self.store.get_sync_state(&account.id, Some(&folder.id))?;
+        self.store.save_sync_state(&SyncState {
+            account_id: account.id.clone(),
+            folder_id: Some(folder.id.clone()),
+            state: SyncStateKind::Watching,
+            last_uid: previous_state
+                .as_ref()
+                .and_then(|state| state.last_uid.clone()),
+            last_synced_at: previous_state
+                .as_ref()
+                .and_then(|state| state.last_synced_at.clone()),
+            error_message: None,
+            backoff_until: None,
+            failure_count: previous_state
+                .as_ref()
+                .map(|state| state.failure_count)
+                .unwrap_or(0),
+        })?;
+
+        match self
+            .protocol
+            .watch_folder_until_change(&settings, &account, &folder)
+            .await
+        {
+            Ok(outcome) => Ok(outcome),
+            Err(err) => {
+                let current_state = self.store.get_sync_state(&account.id, Some(&folder.id))?;
+                let failure_count = current_state
+                    .as_ref()
+                    .map(|state| state.failure_count)
+                    .or_else(|| previous_state.as_ref().map(|state| state.failure_count))
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                self.store.save_sync_state(&SyncState {
+                    account_id: account.id,
+                    folder_id: Some(folder.id),
+                    state: SyncStateKind::Backoff,
+                    last_uid: current_state
+                        .as_ref()
+                        .and_then(|state| state.last_uid.clone())
+                        .or_else(|| {
+                            previous_state
+                                .as_ref()
+                                .and_then(|state| state.last_uid.clone())
+                        }),
+                    last_synced_at: current_state
+                        .as_ref()
+                        .and_then(|state| state.last_synced_at.clone())
+                        .or_else(|| {
+                            previous_state
+                                .as_ref()
+                                .and_then(|state| state.last_synced_at.clone())
+                        }),
+                    error_message: Some(err.to_string()),
+                    backoff_until: Some(now_plus_seconds_rfc3339(backoff_seconds(failure_count))),
+                    failure_count,
+                })?;
+                Err(err.into())
+            }
+        }
     }
 
     pub fn get_sync_status(&self, account_id: String) -> ApiResult<Vec<SyncState>> {
@@ -1435,6 +1506,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_account_config_does_not_test_connection() {
+        let protocol = CountingConnectionProtocol::default();
+        let test_calls = Arc::clone(&protocol.test_calls);
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+
+        let account = api
+            .save_account_config(SaveAccountConfigRequest {
+                id: None,
+                display_name: "Ops".to_string(),
+                email: "ops@example.com".to_string(),
+                password: "secret".to_string(),
+                imap_host: "imap.invalid.example".to_string(),
+                imap_port: 993,
+                imap_tls: true,
+                smtp_host: "smtp.invalid.example".to_string(),
+                smtp_port: 465,
+                smtp_tls: true,
+                sync_enabled: true,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(test_calls.lock().len(), 0);
+        assert_eq!(
+            api.get_account_config(account.id).unwrap().password,
+            "secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_test_account_connection_uses_protocol() {
+        let protocol = CountingConnectionProtocol::default();
+        let test_calls = Arc::clone(&protocol.test_calls);
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+
+        let result = api
+            .test_account_connection(TestConnectionRequest {
+                account_id: None,
+                manual: Some(SaveAccountConfigRequest {
+                    id: None,
+                    display_name: "Ops".to_string(),
+                    email: "ops@example.com".to_string(),
+                    password: "secret".to_string(),
+                    imap_host: "imap.example.com".to_string(),
+                    imap_port: 993,
+                    imap_tls: true,
+                    smtp_host: "smtp.example.com".to_string(),
+                    smtp_port: 465,
+                    smtp_tls: true,
+                    sync_enabled: true,
+                }),
+            })
+            .await
+            .unwrap();
+
+        assert!(result.imap_ok);
+        assert_eq!(test_calls.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn watch_folder_changed_returns_changed_and_marks_folder_watching() {
+        let protocol = WatchProtocol {
+            outcome: Ok(mail_core::FolderWatchOutcome::Changed),
+            ..WatchProtocol::default()
+        };
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        api.sync_account(account.id.clone()).await.unwrap();
+        let inbox = api
+            .store
+            .find_folder_by_role(&account.id, FolderRole::Inbox)
+            .unwrap()
+            .unwrap();
+
+        let outcome = api
+            .watch_folder_until_change(account.id.clone(), inbox.id.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, mail_core::FolderWatchOutcome::Changed);
+        let state = api
+            .store
+            .get_sync_state(&account.id, Some(&inbox.id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.state, SyncStateKind::Watching);
+    }
+
+    #[tokio::test]
+    async fn watch_folder_error_enters_folder_backoff() {
+        let protocol = WatchProtocol {
+            outcome: Err(ProtocolError::Unsupported("idle unavailable".to_string())),
+            ..WatchProtocol::default()
+        };
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        api.sync_account(account.id.clone()).await.unwrap();
+        let inbox = api
+            .store
+            .find_folder_by_role(&account.id, FolderRole::Inbox)
+            .unwrap()
+            .unwrap();
+
+        assert!(api
+            .watch_folder_until_change(account.id.clone(), inbox.id.clone())
+            .await
+            .is_err());
+
+        let state = api
+            .store
+            .get_sync_state(&account.id, Some(&inbox.id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.state, SyncStateKind::Backoff);
+        assert_eq!(state.failure_count, 1);
+        assert!(state.backoff_until.is_some());
+    }
+
+    #[tokio::test]
     async fn sync_failure_enters_backoff_and_blocks_next_attempt() {
         let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(FailingFetchProtocol));
         let account = api
@@ -1772,6 +1962,149 @@ mod tests {
                 actions: Arc::new(Mutex::new(Vec::new())),
                 sends: Arc::new(Mutex::new(Vec::new())),
                 fail_actions: false,
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingConnectionProtocol {
+        test_calls: Arc<Mutex<Vec<ConnectionSettings>>>,
+    }
+
+    #[async_trait]
+    impl MailProtocol for CountingConnectionProtocol {
+        async fn test_connection(
+            &self,
+            settings: &ConnectionSettings,
+        ) -> ProtocolResult<ConnectionTestResult> {
+            self.test_calls.lock().push(settings.clone());
+            Ok(ConnectionTestResult {
+                imap_ok: true,
+                smtp_ok: true,
+                message: "ok".to_string(),
+            })
+        }
+
+        async fn fetch_folders(
+            &self,
+            _settings: &ConnectionSettings,
+            _account: &MailAccount,
+        ) -> ProtocolResult<Vec<MailFolder>> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_messages(
+            &self,
+            _settings: &ConnectionSettings,
+            _account: &MailAccount,
+            _folder: &MailFolder,
+            _request: &MessageFetchRequest,
+        ) -> ProtocolResult<Vec<MailMessage>> {
+            Ok(Vec::new())
+        }
+
+        async fn send_message(
+            &self,
+            _settings: &ConnectionSettings,
+            _draft: &SendMessageDraft,
+        ) -> ProtocolResult<String> {
+            Ok(new_id())
+        }
+
+        async fn apply_action(
+            &self,
+            _settings: &ConnectionSettings,
+            _account: &MailAccount,
+            _action: &RemoteMailAction,
+        ) -> ProtocolResult<()> {
+            Ok(())
+        }
+    }
+
+    struct WatchProtocol {
+        outcome: ProtocolResult<mail_core::FolderWatchOutcome>,
+    }
+
+    impl Default for WatchProtocol {
+        fn default() -> Self {
+            Self {
+                outcome: Ok(mail_core::FolderWatchOutcome::Timeout),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MailProtocol for WatchProtocol {
+        async fn test_connection(
+            &self,
+            _settings: &ConnectionSettings,
+        ) -> ProtocolResult<ConnectionTestResult> {
+            Ok(ConnectionTestResult {
+                imap_ok: true,
+                smtp_ok: true,
+                message: "ok".to_string(),
+            })
+        }
+
+        async fn fetch_folders(
+            &self,
+            _settings: &ConnectionSettings,
+            account: &MailAccount,
+        ) -> ProtocolResult<Vec<MailFolder>> {
+            RecordingProtocol::default()
+                .fetch_folders(_settings, account)
+                .await
+        }
+
+        async fn fetch_messages(
+            &self,
+            _settings: &ConnectionSettings,
+            account: &MailAccount,
+            folder: &MailFolder,
+            request: &MessageFetchRequest,
+        ) -> ProtocolResult<Vec<MailMessage>> {
+            RecordingProtocol::default()
+                .fetch_messages(_settings, account, folder, request)
+                .await
+        }
+
+        async fn send_message(
+            &self,
+            _settings: &ConnectionSettings,
+            _draft: &SendMessageDraft,
+        ) -> ProtocolResult<String> {
+            Ok(new_id())
+        }
+
+        async fn apply_action(
+            &self,
+            _settings: &ConnectionSettings,
+            _account: &MailAccount,
+            _action: &RemoteMailAction,
+        ) -> ProtocolResult<()> {
+            Ok(())
+        }
+
+        async fn watch_folder_until_change(
+            &self,
+            _settings: &ConnectionSettings,
+            _account: &MailAccount,
+            _folder: &MailFolder,
+        ) -> ProtocolResult<mail_core::FolderWatchOutcome> {
+            match &self.outcome {
+                Ok(outcome) => Ok(*outcome),
+                Err(ProtocolError::Connection(message)) => {
+                    Err(ProtocolError::Connection(message.clone()))
+                }
+                Err(ProtocolError::Authentication(message)) => {
+                    Err(ProtocolError::Authentication(message.clone()))
+                }
+                Err(ProtocolError::Fetch(message)) => Err(ProtocolError::Fetch(message.clone())),
+                Err(ProtocolError::Parse(message)) => Err(ProtocolError::Parse(message.clone())),
+                Err(ProtocolError::Send(message)) => Err(ProtocolError::Send(message.clone())),
+                Err(ProtocolError::Unsupported(message)) => {
+                    Err(ProtocolError::Unsupported(message.clone()))
+                }
             }
         }
     }
