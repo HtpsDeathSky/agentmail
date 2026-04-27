@@ -74,6 +74,15 @@ const actionLabels: Record<MailActionKind, string> = {
   batch_move: "BATCH MOVE"
 };
 
+export function formatFolderCount(folder: Pick<MailFolder, "unread_count" | "total_count">) {
+  if (folder.unread_count > 0) return `${folder.unread_count}/${folder.total_count}`;
+  return String(folder.total_count);
+}
+
+export function formatSendQueuedStatus(recipients: string[]) {
+  return `send queued for ${recipients.join(", ")} / confirm SEND in PENDING ACTIONS`;
+}
+
 export function App() {
   const [accounts, setAccounts] = useState<MailAccount[]>([]);
   const [folders, setFolders] = useState<MailFolder[]>([]);
@@ -258,6 +267,7 @@ export function App() {
           message_ids: [selectedMessageId],
           target_folder_id: targetFolderId ?? null
         });
+        await refreshFolders(selectedAccountId);
         await refreshMessages(selectedAccountId, selectedFolderId, query);
         await refreshAudits();
         await refreshPendingActions(selectedAccountId);
@@ -273,6 +283,7 @@ export function App() {
       isAnalyzing,
       query,
       refreshAudits,
+      refreshFolders,
       refreshMessages,
       refreshPendingActions,
       selectedAccountId,
@@ -307,7 +318,7 @@ export function App() {
       await refreshAudits();
       await refreshPendingActions(draft.account_id);
       setComposerOpen(false);
-      setStatus(`send queued for ${draft.to.join(", ")}`);
+      setStatus(formatSendQueuedStatus(draft.to));
     },
     [refreshAudits, refreshPendingActions]
   );
@@ -337,6 +348,7 @@ export function App() {
       setActionRunning(true);
       try {
         await api.confirmAction(actionId);
+        await refreshFolders(selectedAccountId);
         await refreshMessages(selectedAccountId, selectedFolderId, query);
         await refreshAudits();
         await refreshPendingActions(selectedAccountId);
@@ -349,7 +361,7 @@ export function App() {
         setActionRunning(false);
       }
     },
-    [isActionRunning, isAnalyzing, query, refreshAudits, refreshMessages, refreshPendingActions, selectedAccountId, selectedFolderId]
+    [isActionRunning, isAnalyzing, query, refreshAudits, refreshFolders, refreshMessages, refreshPendingActions, selectedAccountId, selectedFolderId]
   );
 
   const handleRejectPending = useCallback(
@@ -428,7 +440,7 @@ export function App() {
                 >
                   <Icon size={15} />
                   <span>{folder.name}</span>
-                  <code>{folder.unread_count}</code>
+                  <code>{formatFolderCount(folder)}</code>
                 </button>
               );
             })}

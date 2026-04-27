@@ -388,6 +388,29 @@ impl MailStore {
         .map_err(Into::into)
     }
 
+    pub fn refresh_folder_counts(&self, folder_id: &str) -> StoreResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            r#"
+            UPDATE folders
+            SET
+              unread_count = (
+                SELECT COUNT(*)
+                FROM messages
+                WHERE folder_id = ?1 AND is_read = 0 AND deleted_at IS NULL
+              ),
+              total_count = (
+                SELECT COUNT(*)
+                FROM messages
+                WHERE folder_id = ?1 AND deleted_at IS NULL
+              )
+            WHERE id = ?1
+            "#,
+            params![folder_id],
+        )?;
+        Ok(())
+    }
+
     pub fn upsert_message(&self, message: &MailMessage) -> StoreResult<()> {
         let recipients_json = serde_json::to_string(&message.recipients)?;
         let cc_json = serde_json::to_string(&message.cc)?;

@@ -344,6 +344,7 @@ impl AppApi {
                 self.store.upsert_message(&message)?;
                 message_count += 1;
             }
+            self.store.refresh_folder_counts(&folder.id)?;
             last_uid = folder_last_uid.clone().or(last_uid);
             successful_folders += 1;
 
@@ -862,6 +863,13 @@ impl AppApi {
                     "unsupported confirmed mail action: {:?}",
                     request.action
                 )));
+            }
+        }
+        self.store
+            .refresh_folder_counts(&remote_action.source_folder.id)?;
+        if let Some(target) = remote_action.target_folder.as_ref() {
+            if target.id != remote_action.source_folder.id {
+                self.store.refresh_folder_counts(&target.id)?;
             }
         }
         Ok(())
@@ -1410,6 +1418,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_recomputes_folder_counts_from_stored_messages() {
+        let api = AppApi::new(
+            MailStore::memory().unwrap(),
+            Arc::new(MemorySecretStore::default()),
+            Arc::new(PartialFailingFetchProtocol),
+        );
+        let account = add_sample_account(&api).await;
+
+        api.sync_account(account.id.clone()).await.unwrap();
+
+        let inbox = api
+            .store
+            .find_folder_by_role(&account.id, FolderRole::Inbox)
+            .unwrap()
+            .unwrap();
+        assert_eq!(inbox.total_count, 1);
+        assert_eq!(inbox.unread_count, 1);
+    }
+
+    #[tokio::test]
     async fn low_risk_action_calls_protocol_then_updates_local_state() {
         let protocol = RecordingProtocol::default();
         let actions = Arc::clone(&protocol.actions);
@@ -1437,6 +1465,32 @@ mod tests {
         assert_eq!(actions.lock()[0].action, MailActionKind::MarkRead);
         assert_eq!(actions.lock()[0].uids, vec!["42".to_string()]);
         assert!(api.store.get_message(&message.id).unwrap().flags.is_read);
+    }
+
+    #[tokio::test]
+    async fn confirmed_action_refreshes_folder_counts() {
+        let api = AppApi::new(
+            MailStore::memory().unwrap(),
+            Arc::new(MemorySecretStore::default()),
+            Arc::new(RecordingProtocol::default()),
+        );
+        let account = add_sample_account(&api).await;
+        api.sync_account(account.id.clone()).await.unwrap();
+        let message = first_message(&api, &account.id);
+        let inbox_id = message.folder_id.clone();
+
+        api.execute_mail_action(MailActionRequest {
+            action: MailActionKind::MarkRead,
+            account_id: account.id.clone(),
+            message_ids: vec![message.id],
+            target_folder_id: None,
+        })
+        .await
+        .unwrap();
+
+        let inbox = api.store.get_folder(&inbox_id).unwrap();
+        assert_eq!(inbox.total_count, 1);
+        assert_eq!(inbox.unread_count, 0);
     }
 
     #[tokio::test]
