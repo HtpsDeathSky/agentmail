@@ -256,7 +256,8 @@ impl MailProtocol for LiveMailProtocol {
 
         let mut builder = Message::builder()
             .from(parse_mailbox(&settings.email)?)
-            .subject(draft.subject.clone());
+            .subject(draft.subject.clone())
+            .message_id(draft.message_id_header.clone());
         for recipient in &draft.to {
             builder = builder.to(parse_mailbox(recipient)?);
         }
@@ -938,9 +939,14 @@ fn uid_set_from_strings(uids: &[String]) -> ProtocolResult<String> {
 }
 
 fn infer_folder_role(path: &str) -> FolderRole {
-    match path.to_ascii_lowercase().as_str() {
+    let normalized = path.to_ascii_lowercase();
+    let display_name = normalized
+        .rsplit(['/', '.'])
+        .next()
+        .unwrap_or(normalized.as_str());
+    match display_name {
         "inbox" => FolderRole::Inbox,
-        "sent" | "sent messages" | "sent items" => FolderRole::Sent,
+        "sent" | "sent mail" | "sent messages" | "sent items" => FolderRole::Sent,
         "archive" | "archives" => FolderRole::Archive,
         "trash" | "deleted" | "deleted messages" | "deleted items" => FolderRole::Trash,
         "drafts" | "draft" => FolderRole::Drafts,
@@ -1025,6 +1031,12 @@ mod tests {
     fn validates_mailbox_addresses_with_protocol_parser() {
         assert!(validate_mailbox_address("ops@example.com").is_ok());
         assert!(validate_mailbox_address("app test").is_err());
+    }
+
+    #[test]
+    fn infers_common_provider_sent_folder_paths() {
+        assert_eq!(infer_folder_role("Sent Mail"), FolderRole::Sent);
+        assert_eq!(infer_folder_role("[Gmail]/Sent Mail"), FolderRole::Sent);
     }
 
     #[test]

@@ -72,4 +72,72 @@ describe("api demo AI bindings", () => {
   it("supports starting account watchers in the browser demo", async () => {
     await expect(api.startAccountWatchers("demo-account")).resolves.toBeNull();
   });
+
+  it("shows queued sends in Sent immediately and removes the placeholder on reject", async () => {
+    const account = await api.saveAccountConfig({
+      id: null,
+      display_name: "Queued Send Demo",
+      email: "queued-send-demo@example.com",
+      password: "plain-mail-secret",
+      imap_host: "imap.queued-send.example.com",
+      imap_port: 993,
+      imap_tls: true,
+      smtp_host: "smtp.queued-send.example.com",
+      smtp_port: 465,
+      smtp_tls: true,
+      sync_enabled: true
+    });
+
+    const pendingId = await api.sendMessage({
+      account_id: account.id,
+      to: ["sec@example.com"],
+      cc: ["ops-lead@example.com"],
+      subject: "Demo queued send",
+      body: "Visible before confirmation"
+    });
+
+    const pending = (await api.listPendingActions(account.id)).find((action) => action.id === pendingId);
+    expect(pending).toBeDefined();
+    expect(pending?.draft?.subject).toBe("Demo queued send");
+    expect(pending?.draft?.message_id_header).toMatch(/^<.+@agentmail\.local>$/);
+    expect(pending?.local_message_id).toBeTruthy();
+
+    const sentFolder = (await api.listFolders(account.id)).find(
+      (folder) => folder.account_id === account.id && folder.role === "sent"
+    );
+    expect(sentFolder).toBeDefined();
+    expect(sentFolder?.total_count).toBe(1);
+    expect(sentFolder?.unread_count).toBe(0);
+
+    const sentMessages = await api.listMessages({
+      account_id: account.id,
+      folder_id: sentFolder?.id,
+      limit: 10,
+      offset: 0
+    });
+    const placeholder = sentMessages.find((message) => message.id === pending?.local_message_id);
+    expect(placeholder).toBeDefined();
+    expect(placeholder?.uid).toBeNull();
+    expect(placeholder?.message_id_header).toBe(pending?.draft?.message_id_header);
+    expect(placeholder?.sender).toBe(account.email);
+    expect(placeholder?.recipients).toEqual(["sec@example.com"]);
+    expect(placeholder?.cc).toEqual(["ops-lead@example.com"]);
+    expect(placeholder?.subject).toBe("Demo queued send");
+    expect(placeholder?.body).toBe("Visible before confirmation");
+
+    await api.rejectAction(pendingId);
+
+    expect((await api.listPendingActions(account.id)).some((action) => action.id === pendingId)).toBe(false);
+    await expect(
+      api.listMessages({
+        account_id: account.id,
+        folder_id: sentFolder?.id,
+        limit: 10,
+        offset: 0
+      })
+    ).resolves.toEqual([]);
+    const sentFolderAfterReject = (await api.listFolders(account.id)).find((folder) => folder.id === sentFolder?.id);
+    expect(sentFolderAfterReject?.total_count).toBe(0);
+    expect(sentFolderAfterReject?.unread_count).toBe(0);
+  });
 });

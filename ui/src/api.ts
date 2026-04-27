@@ -161,6 +161,7 @@ export interface SendMessageDraft {
   cc: string[];
   subject: string;
   body: string;
+  message_id_header?: string | null;
 }
 
 export interface PendingMailAction {
@@ -169,6 +170,7 @@ export interface PendingMailAction {
   action: MailActionKind;
   message_ids: string[];
   target_folder_id?: string | null;
+  local_message_id?: string | null;
   draft?: SendMessageDraft | null;
   status: "pending" | "accepted" | "rejected" | "executed" | "failed";
   error_message?: string | null;

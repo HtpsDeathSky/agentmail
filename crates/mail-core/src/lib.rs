@@ -201,6 +201,8 @@ pub struct PendingMailAction {
     pub action: MailActionKind,
     pub message_ids: Vec<String>,
     pub target_folder_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_message_id: Option<String>,
     pub draft: Option<SendMessageDraft>,
     pub status: PendingActionStatus,
     pub error_message: Option<String>,
@@ -263,6 +265,8 @@ pub struct SendMessageDraft {
     pub cc: Vec<String>,
     pub subject: String,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id_header: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -7,7 +7,7 @@ use mail_core::{
     PendingActionStatus, PendingMailAction, SyncState, SyncStateKind,
 };
 use parking_lot::Mutex;
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -193,6 +193,7 @@ impl MailStore {
               action TEXT NOT NULL,
               message_ids_json TEXT NOT NULL,
               target_folder_id TEXT,
+              local_message_id TEXT,
               draft_json TEXT,
               status TEXT NOT NULL,
               error_message TEXT,
@@ -232,6 +233,12 @@ impl MailStore {
             "accounts",
             "password",
             "ALTER TABLE accounts ADD COLUMN password TEXT NOT NULL DEFAULT ''",
+        )?;
+        ensure_column(
+            &conn,
+            "pending_actions",
+            "local_message_id",
+            "ALTER TABLE pending_actions ADD COLUMN local_message_id TEXT",
         )?;
         conn.execute(
             "UPDATE sync_states SET folder_id = '' WHERE folder_id IS NULL",
@@ -368,26 +375,7 @@ impl MailStore {
 
     pub fn save_folder(&self, folder: &MailFolder) -> StoreResult<()> {
         let conn = self.conn.lock();
-        conn.execute(
-            r#"
-            INSERT INTO folders (id, account_id, name, path, role, unread_count, total_count)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            ON CONFLICT(account_id, path) DO UPDATE SET
-              name=excluded.name,
-              role=excluded.role,
-              unread_count=excluded.unread_count,
-              total_count=excluded.total_count
-            "#,
-            params![
-                folder.id,
-                folder.account_id,
-                folder.name,
-                folder.path,
-                folder_role_to_str(folder.role),
-                folder.unread_count,
-                folder.total_count,
-            ],
-        )?;
+        save_folder_on_conn(&conn, folder)?;
         Ok(())
     }
 
@@ -453,102 +441,14 @@ impl MailStore {
 
     pub fn refresh_folder_counts(&self, folder_id: &str) -> StoreResult<()> {
         let conn = self.conn.lock();
-        conn.execute(
-            r#"
-            UPDATE folders
-            SET
-              unread_count = (
-                SELECT COUNT(*)
-                FROM messages
-                WHERE folder_id = ?1 AND is_read = 0 AND deleted_at IS NULL
-              ),
-              total_count = (
-                SELECT COUNT(*)
-                FROM messages
-                WHERE folder_id = ?1 AND deleted_at IS NULL
-              )
-            WHERE id = ?1
-            "#,
-            params![folder_id],
-        )?;
+        refresh_folder_counts_on_conn(&conn, folder_id)?;
         Ok(())
     }
 
     pub fn upsert_message(&self, message: &MailMessage) -> StoreResult<()> {
-        let recipients_json = serde_json::to_string(&message.recipients)?;
-        let cc_json = serde_json::to_string(&message.cc)?;
-        let attachments_json = serde_json::to_string(&message.attachments)?;
-        let body_for_fts = message.body.as_deref().unwrap_or(&message.body_preview);
-        let recipients_for_fts = message.recipients.join(" ");
-
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
-        tx.execute(
-            r#"
-            INSERT INTO messages (
-              id, account_id, folder_id, uid, message_id_header, subject, sender,
-              recipients_json, cc_json, received_at, body_preview, body, attachments_json,
-              is_read, is_starred, is_answered, is_forwarded, size_bytes, deleted_at
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
-            ON CONFLICT(account_id, folder_id, uid) DO UPDATE SET
-              subject=excluded.subject,
-              sender=excluded.sender,
-              recipients_json=excluded.recipients_json,
-              cc_json=excluded.cc_json,
-              received_at=excluded.received_at,
-              body_preview=excluded.body_preview,
-              body=excluded.body,
-              attachments_json=excluded.attachments_json,
-              is_read=excluded.is_read,
-              is_starred=excluded.is_starred,
-              is_answered=excluded.is_answered,
-              is_forwarded=excluded.is_forwarded,
-              size_bytes=excluded.size_bytes,
-              deleted_at=excluded.deleted_at
-            "#,
-            params![
-                message.id,
-                message.account_id,
-                message.folder_id,
-                message.uid,
-                message.message_id_header,
-                message.subject,
-                message.sender,
-                recipients_json,
-                cc_json,
-                message.received_at,
-                message.body_preview,
-                message.body,
-                attachments_json,
-                message.flags.is_read,
-                message.flags.is_starred,
-                message.flags.is_answered,
-                message.flags.is_forwarded,
-                message.size_bytes,
-                message.deleted_at,
-            ],
-        )?;
-        tx.execute(
-            "DELETE FROM message_fts WHERE message_id = ?1",
-            params![message.id],
-        )?;
-        if message.deleted_at.is_none() {
-            tx.execute(
-                r#"
-                INSERT INTO message_fts (message_id, subject, sender, recipients, body, summary)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                "#,
-                params![
-                    message.id,
-                    message.subject,
-                    message.sender,
-                    recipients_for_fts,
-                    body_for_fts,
-                    message.body_preview,
-                ],
-            )?;
-        }
+        upsert_message_tx(&tx, message)?;
         tx.commit()?;
         Ok(())
     }
@@ -774,26 +674,34 @@ impl MailStore {
         Ok(())
     }
 
-    pub fn write_audit(&self, audit: &MailActionAudit) -> StoreResult<()> {
-        let message_ids_json = serde_json::to_string(&audit.message_ids)?;
+    pub fn move_uidless_messages_to_folder(
+        &self,
+        account_id: &str,
+        source_folder_id: &str,
+        target_folder_id: &str,
+    ) -> StoreResult<usize> {
+        if source_folder_id == target_folder_id {
+            return Ok(0);
+        }
         let conn = self.conn.lock();
-        conn.execute(
+        let changed = conn.execute(
             r#"
-            INSERT INTO action_audits (
-              id, account_id, action, message_ids_json, status, error_message, created_at
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            UPDATE messages
+            SET folder_id = ?3
+            WHERE account_id = ?1
+              AND folder_id = ?2
+              AND uid IS NULL
+              AND message_id_header IS NOT NULL
+              AND deleted_at IS NULL
             "#,
-            params![
-                audit.id,
-                audit.account_id,
-                action_to_str(audit.action),
-                message_ids_json,
-                audit_status_to_str(audit.status),
-                audit.error_message,
-                audit.created_at,
-            ],
+            params![account_id, source_folder_id, target_folder_id],
         )?;
+        Ok(changed)
+    }
+
+    pub fn write_audit(&self, audit: &MailActionAudit) -> StoreResult<()> {
+        let conn = self.conn.lock();
+        write_audit_on_conn(&conn, audit)?;
         Ok(())
     }
 
@@ -812,38 +720,26 @@ impl MailStore {
     }
 
     pub fn save_pending_action(&self, action: &PendingMailAction) -> StoreResult<()> {
-        let message_ids_json = serde_json::to_string(&action.message_ids)?;
-        let draft_json = action
-            .draft
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
         let conn = self.conn.lock();
-        conn.execute(
-            r#"
-            INSERT INTO pending_actions (
-              id, account_id, action, message_ids_json, target_folder_id, draft_json,
-              status, error_message, created_at, updated_at
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-            ON CONFLICT(id) DO UPDATE SET
-              status=excluded.status,
-              error_message=excluded.error_message,
-              updated_at=excluded.updated_at
-            "#,
-            params![
-                action.id,
-                action.account_id,
-                action_to_str(action.action),
-                message_ids_json,
-                action.target_folder_id,
-                draft_json,
-                pending_status_to_str(action.status),
-                action.error_message,
-                action.created_at,
-                action.updated_at,
-            ],
-        )?;
+        save_pending_action_on_conn(&conn, action)?;
+        Ok(())
+    }
+
+    pub fn save_queued_send_with_placeholder(
+        &self,
+        pending: &PendingMailAction,
+        audit: &MailActionAudit,
+        sent_folder: &MailFolder,
+        placeholder: &MailMessage,
+    ) -> StoreResult<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        save_folder_on_conn(&tx, sent_folder)?;
+        save_pending_action_on_conn(&tx, pending)?;
+        write_audit_on_conn(&tx, audit)?;
+        upsert_message_tx(&tx, placeholder)?;
+        refresh_folder_counts_on_conn(&tx, &sent_folder.id)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -851,7 +747,7 @@ impl MailStore {
         let conn = self.conn.lock();
         conn.query_row(
             r#"
-            SELECT id, account_id, action, message_ids_json, target_folder_id, draft_json,
+            SELECT id, account_id, action, message_ids_json, target_folder_id, local_message_id, draft_json,
                    status, error_message, created_at, updated_at
             FROM pending_actions
             WHERE id = ?1
@@ -871,7 +767,7 @@ impl MailStore {
         if let Some(account_id) = account_id {
             let mut stmt = conn.prepare(
                 r#"
-                SELECT id, account_id, action, message_ids_json, target_folder_id, draft_json,
+                SELECT id, account_id, action, message_ids_json, target_folder_id, local_message_id, draft_json,
                        status, error_message, created_at, updated_at
                 FROM pending_actions
                 WHERE account_id = ?1 AND status = 'pending'
@@ -883,7 +779,7 @@ impl MailStore {
         } else {
             let mut stmt = conn.prepare(
                 r#"
-                SELECT id, account_id, action, message_ids_json, target_folder_id, draft_json,
+                SELECT id, account_id, action, message_ids_json, target_folder_id, local_message_id, draft_json,
                        status, error_message, created_at, updated_at
                 FROM pending_actions
                 WHERE status = 'pending'
@@ -1034,6 +930,299 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, alter_sql: &str) 
     Ok(())
 }
 
+fn save_folder_on_conn(conn: &Connection, folder: &MailFolder) -> StoreResult<()> {
+    conn.execute(
+        r#"
+        INSERT INTO folders (id, account_id, name, path, role, unread_count, total_count)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        ON CONFLICT(account_id, path) DO UPDATE SET
+          name=excluded.name,
+          role=excluded.role,
+          unread_count=excluded.unread_count,
+          total_count=excluded.total_count
+        "#,
+        params![
+            folder.id,
+            folder.account_id,
+            folder.name,
+            folder.path,
+            folder_role_to_str(folder.role),
+            folder.unread_count,
+            folder.total_count,
+        ],
+    )?;
+    Ok(())
+}
+
+fn refresh_folder_counts_on_conn(conn: &Connection, folder_id: &str) -> StoreResult<()> {
+    conn.execute(
+        r#"
+        UPDATE folders
+        SET
+          unread_count = (
+            SELECT COUNT(*)
+            FROM messages
+            WHERE folder_id = ?1 AND is_read = 0 AND deleted_at IS NULL
+          ),
+          total_count = (
+            SELECT COUNT(*)
+            FROM messages
+            WHERE folder_id = ?1 AND deleted_at IS NULL
+          )
+        WHERE id = ?1
+        "#,
+        params![folder_id],
+    )?;
+    Ok(())
+}
+
+fn write_audit_on_conn(conn: &Connection, audit: &MailActionAudit) -> StoreResult<()> {
+    let message_ids_json = serde_json::to_string(&audit.message_ids)?;
+    conn.execute(
+        r#"
+        INSERT INTO action_audits (
+          id, account_id, action, message_ids_json, status, error_message, created_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "#,
+        params![
+            audit.id,
+            audit.account_id,
+            action_to_str(audit.action),
+            message_ids_json,
+            audit_status_to_str(audit.status),
+            audit.error_message,
+            audit.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn save_pending_action_on_conn(conn: &Connection, action: &PendingMailAction) -> StoreResult<()> {
+    let message_ids_json = serde_json::to_string(&action.message_ids)?;
+    let draft_json = action
+        .draft
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    conn.execute(
+        r#"
+        INSERT INTO pending_actions (
+          id, account_id, action, message_ids_json, target_folder_id, local_message_id,
+          draft_json, status, error_message, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        ON CONFLICT(id) DO UPDATE SET
+          status=excluded.status,
+          error_message=excluded.error_message,
+          updated_at=excluded.updated_at
+        "#,
+        params![
+            action.id,
+            action.account_id,
+            action_to_str(action.action),
+            message_ids_json,
+            action.target_folder_id,
+            action.local_message_id,
+            draft_json,
+            pending_status_to_str(action.status),
+            action.error_message,
+            action.created_at,
+            action.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn upsert_message_tx(tx: &Transaction<'_>, message: &MailMessage) -> StoreResult<String> {
+    let recipients_json = serde_json::to_string(&message.recipients)?;
+    let cc_json = serde_json::to_string(&message.cc)?;
+    let attachments_json = serde_json::to_string(&message.attachments)?;
+    let body_for_fts = message.body.as_deref().unwrap_or(&message.body_preview);
+    let recipients_for_fts = message.recipients.join(" ");
+
+    let hydrated_placeholder_id = match (&message.uid, &message.message_id_header) {
+        (Some(_), Some(message_id_header)) => tx
+            .query_row(
+                r#"
+                SELECT id
+                FROM messages
+                WHERE account_id = ?1
+                  AND folder_id = ?2
+                  AND uid IS NULL
+                  AND message_id_header = ?3
+                  AND deleted_at IS NULL
+                ORDER BY received_at DESC
+                LIMIT 1
+                "#,
+                params![message.account_id, message.folder_id, message_id_header],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?,
+        _ => None,
+    };
+
+    let stored_message_id = if let Some(existing_id) = hydrated_placeholder_id {
+        if let Some(uid) = message.uid.as_deref() {
+            let duplicate_id = tx
+                .query_row(
+                    r#"
+                    SELECT id
+                    FROM messages
+                    WHERE account_id = ?1
+                      AND folder_id = ?2
+                      AND uid = ?3
+                      AND id != ?4
+                      AND message_id_header = ?5
+                    LIMIT 1
+                    "#,
+                    params![
+                        message.account_id,
+                        message.folder_id,
+                        uid,
+                        existing_id,
+                        message.message_id_header,
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if let Some(duplicate_id) = duplicate_id {
+                tx.execute(
+                    "DELETE FROM message_fts WHERE message_id = ?1",
+                    params![duplicate_id],
+                )?;
+                tx.execute("DELETE FROM messages WHERE id = ?1", params![duplicate_id])?;
+            }
+        }
+        tx.execute(
+            r#"
+            UPDATE messages
+            SET uid=?2,
+                message_id_header=?3,
+                subject=?4,
+                sender=?5,
+                recipients_json=?6,
+                cc_json=?7,
+                received_at=?8,
+                body_preview=?9,
+                body=?10,
+                attachments_json=?11,
+                is_read=?12,
+                is_starred=?13,
+                is_answered=?14,
+                is_forwarded=?15,
+                size_bytes=?16,
+                deleted_at=?17
+            WHERE id = ?1
+            "#,
+            params![
+                existing_id,
+                message.uid,
+                message.message_id_header,
+                message.subject,
+                message.sender,
+                recipients_json,
+                cc_json,
+                message.received_at,
+                message.body_preview,
+                message.body,
+                attachments_json,
+                message.flags.is_read,
+                message.flags.is_starred,
+                message.flags.is_answered,
+                message.flags.is_forwarded,
+                message.size_bytes,
+                message.deleted_at,
+            ],
+        )?;
+        existing_id
+    } else {
+        tx.execute(
+            r#"
+            INSERT INTO messages (
+              id, account_id, folder_id, uid, message_id_header, subject, sender,
+              recipients_json, cc_json, received_at, body_preview, body, attachments_json,
+              is_read, is_starred, is_answered, is_forwarded, size_bytes, deleted_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+            ON CONFLICT(account_id, folder_id, uid) DO UPDATE SET
+              message_id_header=excluded.message_id_header,
+              subject=excluded.subject,
+              sender=excluded.sender,
+              recipients_json=excluded.recipients_json,
+              cc_json=excluded.cc_json,
+              received_at=excluded.received_at,
+              body_preview=excluded.body_preview,
+              body=excluded.body,
+              attachments_json=excluded.attachments_json,
+              is_read=excluded.is_read,
+              is_starred=excluded.is_starred,
+              is_answered=excluded.is_answered,
+              is_forwarded=excluded.is_forwarded,
+              size_bytes=excluded.size_bytes,
+              deleted_at=excluded.deleted_at
+            "#,
+            params![
+                message.id,
+                message.account_id,
+                message.folder_id,
+                message.uid,
+                message.message_id_header,
+                message.subject,
+                message.sender,
+                recipients_json,
+                cc_json,
+                message.received_at,
+                message.body_preview,
+                message.body,
+                attachments_json,
+                message.flags.is_read,
+                message.flags.is_starred,
+                message.flags.is_answered,
+                message.flags.is_forwarded,
+                message.size_bytes,
+                message.deleted_at,
+            ],
+        )?;
+        if let Some(uid) = message.uid.as_deref() {
+            tx.query_row(
+                r#"
+                SELECT id
+                FROM messages
+                WHERE account_id = ?1 AND folder_id = ?2 AND uid = ?3
+                LIMIT 1
+                "#,
+                params![message.account_id, message.folder_id, uid],
+                |row| row.get::<_, String>(0),
+            )?
+        } else {
+            message.id.clone()
+        }
+    };
+
+    tx.execute(
+        "DELETE FROM message_fts WHERE message_id = ?1 OR message_id = ?2",
+        params![stored_message_id, message.id],
+    )?;
+    if message.deleted_at.is_none() {
+        tx.execute(
+            r#"
+            INSERT INTO message_fts (message_id, subject, sender, recipients, body, summary)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                stored_message_id,
+                message.subject,
+                message.sender,
+                recipients_for_fts,
+                body_for_fts,
+                message.body_preview,
+            ],
+        )?;
+    }
+    Ok(stored_message_id)
+}
+
 fn ensure_ai_insights_message_fk(conn: &mut Connection) -> StoreResult<()> {
     let mut stmt = conn.prepare("PRAGMA foreign_key_list(ai_insights)")?;
     let mut rows = stmt.query([])?;
@@ -1180,8 +1369,8 @@ fn audit_from_row(row: &Row<'_>) -> rusqlite::Result<MailActionAudit> {
 fn pending_action_from_row(row: &Row<'_>) -> rusqlite::Result<PendingMailAction> {
     let action: String = row.get(2)?;
     let message_ids_json: String = row.get(3)?;
-    let draft_json: Option<String> = row.get(5)?;
-    let status: String = row.get(6)?;
+    let draft_json: Option<String> = row.get(6)?;
+    let status: String = row.get(7)?;
     let message_ids = serde_json::from_str(&message_ids_json).unwrap_or_default();
     let draft = draft_json
         .as_deref()
@@ -1193,11 +1382,12 @@ fn pending_action_from_row(row: &Row<'_>) -> rusqlite::Result<PendingMailAction>
         action: action_from_str(&action),
         message_ids,
         target_folder_id: row.get(4)?,
+        local_message_id: row.get(5)?,
         draft,
         status: pending_status_from_str(&status),
-        error_message: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        error_message: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 
@@ -1406,6 +1596,91 @@ mod tests {
     }
 
     #[test]
+    fn upsert_merges_legacy_placeholder_when_remote_uid_row_already_exists() {
+        let store = MailStore::memory().unwrap();
+        let now = now_rfc3339();
+        let account = MailAccount {
+            id: "acct".to_string(),
+            display_name: "Ops".to_string(),
+            email: "ops@example.com".to_string(),
+            imap_host: "imap.example.com".to_string(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_port: 465,
+            smtp_tls: true,
+            sync_enabled: true,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        store.save_account(&account).unwrap();
+        let folder = MailFolder {
+            id: "trash".to_string(),
+            account_id: account.id.clone(),
+            name: "Trash".to_string(),
+            path: "Trash".to_string(),
+            role: FolderRole::Trash,
+            unread_count: 0,
+            total_count: 0,
+        };
+        store.save_folder(&folder).unwrap();
+
+        let placeholder = MailMessage {
+            id: "local-placeholder".to_string(),
+            account_id: account.id.clone(),
+            folder_id: folder.id.clone(),
+            uid: None,
+            message_id_header: Some("<dup@example.com>".to_string()),
+            subject: "Local placeholder".to_string(),
+            sender: "sec@example.com".to_string(),
+            recipients: vec![account.email.clone()],
+            cc: Vec::new(),
+            received_at: now.clone(),
+            body_preview: "old local body".to_string(),
+            body: Some("old local body".to_string()),
+            attachments: Vec::new(),
+            flags: MessageFlags::default(),
+            size_bytes: Some(100),
+            deleted_at: None,
+        };
+        let mut remote = placeholder.clone();
+        remote.id = "remote-duplicate".to_string();
+        remote.uid = Some("900".to_string());
+        remote.subject = "Remote duplicate".to_string();
+        remote.body_preview = "old remote body".to_string();
+        remote.body = Some("old remote body".to_string());
+
+        store.upsert_message(&remote).unwrap();
+        store.upsert_message(&placeholder).unwrap();
+
+        let mut incoming = remote.clone();
+        incoming.id = "incoming-remote".to_string();
+        incoming.subject = "Hydrated canonical".to_string();
+        incoming.body_preview = "fresh canonical search marker".to_string();
+        incoming.body = Some("fresh canonical search marker".to_string());
+
+        store.upsert_message(&incoming).unwrap();
+
+        let messages = store
+            .list_messages(&MessageQuery {
+                account_id: Some(account.id.clone()),
+                folder_id: Some(folder.id.clone()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, placeholder.id);
+        assert_eq!(messages[0].uid.as_deref(), Some("900"));
+        assert_eq!(messages[0].subject, "Hydrated canonical");
+
+        let hits = store.search_messages("fresh", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, placeholder.id);
+        assert!(store.search_messages("old", 10).unwrap().is_empty());
+    }
+
+    #[test]
     fn account_level_sync_state_updates_in_place() {
         let store = MailStore::memory().unwrap();
         let now = now_rfc3339();
@@ -1524,12 +1799,14 @@ mod tests {
             action: MailActionKind::Send,
             message_ids: Vec::new(),
             target_folder_id: None,
+            local_message_id: None,
             draft: Some(mail_core::SendMessageDraft {
                 account_id: account.id.clone(),
                 to: vec!["sec@example.com".to_string()],
                 cc: Vec::new(),
                 subject: "Hold point".to_string(),
                 body: "confirm before sending".to_string(),
+                message_id_header: None,
             }),
             status: PendingActionStatus::Pending,
             error_message: None,

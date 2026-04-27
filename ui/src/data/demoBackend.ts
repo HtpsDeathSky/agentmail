@@ -37,7 +37,7 @@ const account: MailAccount = {
   updated_at: now()
 };
 
-const folders: MailFolder[] = [
+let folders: MailFolder[] = [
   { id: "demo-account:inbox", account_id: account.id, name: "INBOX", path: "INBOX", role: "inbox", unread_count: 3, total_count: 12 },
   { id: "demo-account:sent", account_id: account.id, name: "Sent", path: "Sent", role: "sent", unread_count: 0, total_count: 4 },
   { id: "demo-account:archive", account_id: account.id, name: "Archive", path: "Archive", role: "archive", unread_count: 0, total_count: 32 },
@@ -243,6 +243,12 @@ const validateAiBaseUrl = (baseUrl: string) => {
   if (parsed.protocol !== "https:") throw new Error("base_url must use https");
 };
 
+const isSentFolderPath = (path: string) => {
+  const parts = path.toLowerCase().split(/[/.]/);
+  const name = parts[parts.length - 1] ?? "";
+  return ["sent", "sent mail", "sent messages", "sent items"].includes(name);
+};
+
 export const demoBackend = {
   async invoke(command: string, args?: Record<string, unknown>): Promise<unknown> {
     await new Promise((resolve) => window.setTimeout(resolve, 120));
@@ -403,13 +409,36 @@ export const demoBackend = {
         return actionResult("executed");
       }
       case "send_message": {
-        const draft = args?.draft as SendMessageDraft;
+        const incomingDraft = args?.draft as SendMessageDraft;
+        const draftAccount = accounts.find((item) => item.id === incomingDraft.account_id);
+        if (!draftAccount) throw new Error("account not found");
+        let sentFolder =
+          folders.find((folder) => folder.account_id === incomingDraft.account_id && folder.role === "sent") ??
+          folders.find((folder) => folder.account_id === incomingDraft.account_id && isSentFolderPath(folder.path));
+        if (!sentFolder) {
+          sentFolder = {
+            id: `${incomingDraft.account_id}:sent`,
+            account_id: incomingDraft.account_id,
+            name: "Sent",
+            path: "Sent",
+            role: "sent",
+            unread_count: 0,
+            total_count: 0
+          };
+          folders = [...folders, sentFolder];
+        } else {
+          sentFolder.role = "sent";
+        }
+        const messageId = crypto.randomUUID();
+        const messageIdHeader = incomingDraft.message_id_header ?? `<${messageId}@agentmail.local>`;
+        const draft: SendMessageDraft = { ...incomingDraft, message_id_header: messageIdHeader };
         const pending: PendingMailAction = {
           id: crypto.randomUUID(),
           account_id: draft.account_id,
           action: "send",
           message_ids: [],
           target_folder_id: null,
+          local_message_id: messageId,
           draft,
           status: "pending",
           error_message: null,
@@ -417,6 +446,30 @@ export const demoBackend = {
           updated_at: now()
         };
         pendingActions = [pending, ...pendingActions];
+        const bodyPreview = draft.body.trim() || "(empty message)";
+        messages = [
+          {
+            id: messageId,
+            account_id: draft.account_id,
+            folder_id: sentFolder.id,
+            uid: null,
+            message_id_header: messageIdHeader,
+            subject: draft.subject,
+            sender: draftAccount.email,
+            recipients: draft.to,
+            cc: draft.cc,
+            received_at: now(),
+            body_preview: bodyPreview.slice(0, 180),
+            body: draft.body,
+            attachments: [],
+            flags: { is_read: true, is_starred: false, is_answered: true, is_forwarded: false },
+            size_bytes: null,
+            deleted_at: null
+          },
+          ...messages
+        ];
+        sentFolder.total_count = messages.filter((message) => message.folder_id === sentFolder.id && !message.deleted_at).length;
+        sentFolder.unread_count = messages.filter((message) => message.folder_id === sentFolder.id && !message.deleted_at && !message.flags.is_read).length;
         recordAudit("send", draft.account_id, [], "queued");
         return pending.id;
       }
@@ -442,6 +495,21 @@ export const demoBackend = {
         if (!pending) throw new Error("pending action not found");
         pending.status = "rejected";
         pending.updated_at = now();
+        if (pending.action === "send" && pending.local_message_id) {
+          const placeholder = messages.find((message) => message.id === pending.local_message_id);
+          const folder = placeholder ? folders.find((item) => item.id === placeholder.folder_id) : null;
+          if (
+            placeholder &&
+            folder?.role === "sent" &&
+            placeholder.account_id === pending.account_id &&
+            placeholder.uid == null &&
+            placeholder.message_id_header === pending.draft?.message_id_header
+          ) {
+            placeholder.deleted_at = now();
+            folder.total_count = messages.filter((message) => message.folder_id === folder.id && !message.deleted_at).length;
+            folder.unread_count = messages.filter((message) => message.folder_id === folder.id && !message.deleted_at && !message.flags.is_read).length;
+          }
+        }
         recordAudit(pending.action, pending.account_id, pending.message_ids, "rejected");
         return null;
       }

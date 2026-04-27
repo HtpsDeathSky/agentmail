@@ -1,14 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   applyThemeModeToDocument,
+  clampWorkspaceSplitPercent,
   formatAuditLine,
   formatFolderCount,
   formatSendQueuedStatus,
+  getWorkspaceSplitModel,
   getNextThemeMode,
+  readStoredWorkspaceSplitPercent,
   readStoredThemeMode,
   refreshAfterMailSyncEvent,
   runAutomaticAccountSync,
   runInitialAccountSync,
+  WORKSPACE_SPLIT_STORAGE_KEY,
   THEME_MODE_STORAGE_KEY
 } from "./App";
 
@@ -65,6 +69,71 @@ describe("theme mode helpers", () => {
 
     expect(window.localStorage.getItem(THEME_MODE_STORAGE_KEY)).toBe("light");
     expect(document.documentElement.dataset.theme).toBe("light");
+  });
+});
+
+describe("workspace split helpers", () => {
+  it("keeps a valid split percentage when both panes satisfy their minimum widths", () => {
+    expect(clampWorkspaceSplitPercent(42, 1000, 320, 420)).toBe(42);
+  });
+
+  it("clamps the list pane to its minimum width", () => {
+    expect(clampWorkspaceSplitPercent(20, 1000, 320, 420)).toBe(32);
+  });
+
+  it("clamps the detail pane to its minimum width", () => {
+    expect(clampWorkspaceSplitPercent(70, 1000, 320, 420)).toBe(58);
+  });
+
+  it("falls back to an even split when the container cannot fit both minimum widths", () => {
+    expect(clampWorkspaceSplitPercent(80, 600, 320, 420)).toBe(50);
+  });
+
+  it("uses the exact feasible split when the container exactly fits both minimum widths", () => {
+    expect(clampWorkspaceSplitPercent(80, 740, 320, 420)).toBeCloseTo(43.24, 2);
+  });
+
+  it("reads only valid stored split percentages", () => {
+    window.localStorage.setItem(WORKSPACE_SPLIT_STORAGE_KEY, "44.5");
+
+    expect(readStoredWorkspaceSplitPercent(window.localStorage)).toBe(44.5);
+
+    window.localStorage.setItem(WORKSPACE_SPLIT_STORAGE_KEY, "not-a-number");
+
+    expect(readStoredWorkspaceSplitPercent(window.localStorage)).toBe(45);
+  });
+
+  it("falls back when storage access throws", () => {
+    const storage = {
+      getItem: vi.fn(() => {
+        throw new Error("blocked");
+      })
+    };
+
+    expect(readStoredWorkspaceSplitPercent(storage)).toBe(45);
+  });
+
+  it("computes a feasible split range from measured workspace width minus the divider", () => {
+    expect(getWorkspaceSplitModel(95, 1000, 320, 420)).toEqual({
+      percent: 58,
+      minPercent: 32,
+      maxPercent: 58
+    });
+  });
+
+  it("uses the clamped split for display when stored input is outside the measured range", () => {
+    const model = getWorkspaceSplitModel(10, 1000, 320, 420);
+
+    expect(model.percent).toBe(32);
+    expect(Math.round(100 - model.percent)).toBe(68);
+  });
+
+  it("uses an honest constrained range when both minimum panes cannot fit", () => {
+    expect(getWorkspaceSplitModel(95, 532, 320, 420)).toEqual({
+      percent: 50,
+      minPercent: 50,
+      maxPercent: 50
+    });
   });
 });
 

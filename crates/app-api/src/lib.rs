@@ -270,6 +270,9 @@ impl AppApi {
         let mut first_folder_error = None;
         for folder in &folders {
             self.store.save_folder(folder)?;
+            if folder.role == FolderRole::Sent {
+                self.converge_fallback_sent_placeholders(&account.id, folder)?;
+            }
 
             let previous_state = self.store.get_sync_state(&account.id, Some(&folder.id))?;
             if let Some(backoff_until) = previous_state
@@ -582,13 +585,65 @@ impl AppApi {
                 "recipient list is empty".to_string(),
             ));
         }
-        let pending = self.queue_pending_action(
-            draft.account_id.clone(),
-            MailActionKind::Send,
-            Vec::new(),
-            None,
-            Some(draft),
-        )?;
+        let account = self.store.get_account(&draft.account_id)?;
+        let now = now_rfc3339();
+        let message_id = new_id();
+        let message_id_header = draft
+            .message_id_header
+            .clone()
+            .unwrap_or_else(|| format!("<{message_id}@agentmail.local>"));
+        let draft = SendMessageDraft {
+            message_id_header: Some(message_id_header.clone()),
+            ..draft
+        };
+        let sent = self.sent_folder_for_local_send(&account)?;
+        let pending = PendingMailAction {
+            id: new_id(),
+            account_id: account.id.clone(),
+            action: MailActionKind::Send,
+            message_ids: Vec::new(),
+            target_folder_id: None,
+            local_message_id: Some(message_id.clone()),
+            draft: Some(draft.clone()),
+            status: PendingActionStatus::Pending,
+            error_message: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        let audit = MailActionAudit {
+            id: new_id(),
+            account_id: account.id.clone(),
+            action: MailActionKind::Send,
+            message_ids: Vec::new(),
+            status: ActionAuditStatus::Queued,
+            error_message: None,
+            created_at: now.clone(),
+        };
+        let placeholder = MailMessage {
+            id: message_id.clone(),
+            account_id: account.id.clone(),
+            folder_id: sent.id.clone(),
+            uid: None,
+            message_id_header: Some(message_id_header),
+            subject: draft.subject.clone(),
+            sender: account.email.clone(),
+            recipients: draft.to.clone(),
+            cc: draft.cc.clone(),
+            received_at: now.clone(),
+            body_preview: body_preview_from_body(&draft.body),
+            body: Some(draft.body.clone()),
+            attachments: Vec::new(),
+            flags: mail_core::MessageFlags {
+                is_read: true,
+                is_starred: false,
+                is_answered: true,
+                is_forwarded: false,
+            },
+            size_bytes: None,
+            deleted_at: None,
+        };
+        self.store
+            .save_queued_send_with_placeholder(&pending, &audit, &sent, &placeholder)?;
         Ok(pending.id)
     }
 
@@ -695,6 +750,9 @@ impl AppApi {
                     PendingActionStatus::Failed,
                     Some(&error_message),
                 )?;
+                if pending.action == MailActionKind::Send {
+                    self.cleanup_pending_send_placeholder(&pending)?;
+                }
                 self.write_audit(
                     &pending.account_id,
                     pending.action,
@@ -720,6 +778,9 @@ impl AppApi {
             PendingActionStatus::Rejected,
             None,
         )?;
+        if pending.action == MailActionKind::Send {
+            self.cleanup_pending_send_placeholder(&pending)?;
+        }
         self.write_audit(
             &pending.account_id,
             pending.action,
@@ -764,6 +825,7 @@ impl AppApi {
             action,
             message_ids,
             target_folder_id,
+            local_message_id: None,
             draft,
             status: PendingActionStatus::Pending,
             error_message: None,
@@ -1023,6 +1085,90 @@ impl AppApi {
             .ok_or_else(|| ApiError::InvalidRequest(format!("{role:?} folder is not available")))
     }
 
+    fn sent_folder_for_local_send(&self, account: &MailAccount) -> ApiResult<MailFolder> {
+        if let Some(folder) = self
+            .store
+            .find_folder_by_role(&account.id, FolderRole::Sent)?
+        {
+            return Ok(folder);
+        }
+        if let Some(folder) = self
+            .store
+            .list_folders(&account.id)?
+            .into_iter()
+            .find(|folder| is_sent_folder_path(&folder.path))
+        {
+            return Ok(MailFolder {
+                role: FolderRole::Sent,
+                ..folder
+            });
+        }
+        Ok(MailFolder {
+            id: format!("{}:sent", account.id),
+            account_id: account.id.clone(),
+            name: "Sent".to_string(),
+            path: "Sent".to_string(),
+            role: FolderRole::Sent,
+            unread_count: 0,
+            total_count: 0,
+        })
+    }
+
+    fn cleanup_pending_send_placeholder(&self, pending: &PendingMailAction) -> ApiResult<()> {
+        let Some(message_id) = pending.local_message_id.as_ref() else {
+            return Ok(());
+        };
+        let expected_message_id = pending
+            .draft
+            .as_ref()
+            .and_then(|draft| draft.message_id_header.as_deref());
+        let Some(expected_message_id) = expected_message_id else {
+            return Ok(());
+        };
+        let message = match self.store.get_message(message_id) {
+            Ok(message) => message,
+            Err(StoreError::NotFound(_)) => return Ok(()),
+            Err(err) => return Err(err.into()),
+        };
+        let folder = match self.store.get_folder(&message.folder_id) {
+            Ok(folder) => folder,
+            Err(StoreError::NotFound(_)) => return Ok(()),
+            Err(err) => return Err(err.into()),
+        };
+        if message.account_id != pending.account_id
+            || message.uid.is_some()
+            || folder.role != FolderRole::Sent
+            || message.message_id_header.as_deref() != Some(expected_message_id)
+        {
+            return Ok(());
+        }
+        self.store
+            .soft_delete_messages(std::slice::from_ref(message_id))?;
+        self.store.refresh_folder_counts(&message.folder_id)?;
+        Ok(())
+    }
+
+    fn converge_fallback_sent_placeholders(
+        &self,
+        account_id: &str,
+        real_sent_folder: &MailFolder,
+    ) -> ApiResult<()> {
+        let fallback_sent_id = format!("{account_id}:sent");
+        if real_sent_folder.id == fallback_sent_id {
+            return Ok(());
+        }
+        let moved = self.store.move_uidless_messages_to_folder(
+            account_id,
+            &fallback_sent_id,
+            &real_sent_folder.id,
+        )?;
+        if moved > 0 {
+            self.store.refresh_folder_counts(&fallback_sent_id)?;
+            self.store.refresh_folder_counts(&real_sent_folder.id)?;
+        }
+        Ok(())
+    }
+
     fn confirmation_action_for_request(
         &self,
         request: &MailActionRequest,
@@ -1266,6 +1412,24 @@ fn require_message_uids(messages: &[MailMessage]) -> ApiResult<Vec<String>> {
         uids.push(uid);
     }
     Ok(uids)
+}
+
+fn body_preview_from_body(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "(empty message)".to_string();
+    }
+    trimmed.chars().take(180).collect()
+}
+
+fn is_sent_folder_path(path: &str) -> bool {
+    matches!(
+        path.to_ascii_lowercase()
+            .rsplit(['/', '.'])
+            .next()
+            .unwrap_or_default(),
+        "sent" | "sent mail" | "sent messages" | "sent items"
+    )
 }
 
 fn messages_match_for_remote_delete(local: &MailMessage, remote: &MailMessage) -> bool {
@@ -1980,6 +2144,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_to_trash_remote_sync_hydrates_local_placeholder() {
+        let protocol = RecordingProtocol::default();
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        api.sync_account(account.id.clone()).await.unwrap();
+        let message = first_message(&api, &account.id);
+
+        api.execute_mail_action(MailActionRequest {
+            action: MailActionKind::Delete,
+            account_id: account.id.clone(),
+            message_ids: vec![message.id.clone()],
+            target_folder_id: None,
+        })
+        .await
+        .unwrap();
+
+        let trash = api
+            .store
+            .find_folder_by_role(&account.id, FolderRole::Trash)
+            .unwrap()
+            .unwrap();
+        api.store
+            .upsert_message(&MailMessage {
+                id: format!("{}:{}:900", account.id, trash.id),
+                account_id: account.id.clone(),
+                folder_id: trash.id.clone(),
+                uid: Some("900".to_string()),
+                message_id_header: message.message_id_header.clone(),
+                subject: message.subject.clone(),
+                sender: message.sender.clone(),
+                recipients: message.recipients.clone(),
+                cc: message.cc.clone(),
+                received_at: message.received_at.clone(),
+                body_preview: message.body_preview.clone(),
+                body: message.body.clone(),
+                attachments: Vec::new(),
+                flags: message.flags.clone(),
+                size_bytes: message.size_bytes,
+                deleted_at: None,
+            })
+            .unwrap();
+
+        let trash_messages = api
+            .list_messages(MessageQuery {
+                account_id: Some(account.id.clone()),
+                folder_id: Some(trash.id),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+
+        assert_eq!(trash_messages.len(), 1);
+        assert_eq!(trash_messages[0].id, message.id);
+        assert_eq!(trash_messages[0].uid.as_deref(), Some("900"));
+        assert_eq!(
+            api.store.get_message(&message.id).unwrap().uid.as_deref(),
+            Some("900")
+        );
+    }
+
+    #[tokio::test]
+    async fn uid_resync_after_trash_hydration_updates_search_for_preserved_row() {
+        let protocol = RecordingProtocol::default();
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        api.sync_account(account.id.clone()).await.unwrap();
+        let message = first_message(&api, &account.id);
+
+        api.execute_mail_action(MailActionRequest {
+            action: MailActionKind::Delete,
+            account_id: account.id.clone(),
+            message_ids: vec![message.id.clone()],
+            target_folder_id: None,
+        })
+        .await
+        .unwrap();
+
+        let trash = api
+            .store
+            .find_folder_by_role(&account.id, FolderRole::Trash)
+            .unwrap()
+            .unwrap();
+        let mut remote = message.clone();
+        remote.id = format!("{}:{}:900", account.id, trash.id);
+        remote.folder_id = trash.id.clone();
+        remote.uid = Some("900".to_string());
+        remote.body_preview = "first trash sync body".to_string();
+        remote.body = Some("first trash sync body".to_string());
+        api.store.upsert_message(&remote).unwrap();
+
+        remote.id = format!("{}:{}:900:second", account.id, trash.id);
+        remote.body_preview = "second trash sync searchable marker".to_string();
+        remote.body = Some("second trash sync searchable marker".to_string());
+        api.store.upsert_message(&remote).unwrap();
+
+        let updated = api.store.get_message(&message.id).unwrap();
+        assert_eq!(updated.uid.as_deref(), Some("900"));
+        assert_eq!(
+            updated.body.as_deref(),
+            Some("second trash sync searchable marker")
+        );
+
+        let hits = api.search_messages("second".to_string(), Some(10)).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, message.id);
+        assert!(api
+            .search_messages("first".to_string(), Some(10))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn delete_inside_trash_queues_and_confirms_permanent_delete() {
         let protocol = RecordingProtocol::default();
         let actions = Arc::clone(&protocol.actions);
@@ -2041,6 +2317,7 @@ mod tests {
         let sends = Arc::clone(&protocol.sends);
         let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
         let account = add_sample_account(&api).await;
+        save_sent_folder(&api, &account);
 
         let pending_id = api
             .send_message(SendMessageDraft {
@@ -2049,6 +2326,7 @@ mod tests {
                 cc: Vec::new(),
                 subject: "Confirm send".to_string(),
                 body: "body".to_string(),
+                message_id_header: None,
             })
             .await
             .unwrap();
@@ -2068,7 +2346,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reject_pending_action_does_not_execute_protocol() {
+    async fn send_message_creates_local_sent_placeholder_until_confirmed() {
+        let protocol = RecordingProtocol::default();
+        let sends = Arc::clone(&protocol.sends);
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        let sent = save_sent_folder(&api, &account);
+
+        let pending_id = api
+            .send_message(SendMessageDraft {
+                account_id: account.id.clone(),
+                to: vec!["sec@example.com".to_string()],
+                cc: vec!["ops-lead@example.com".to_string()],
+                subject: "Confirm send".to_string(),
+                body: "body\nwith local visibility".to_string(),
+                message_id_header: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(sends.lock().is_empty());
+        assert!(!pending_id.is_empty());
+
+        let sent_messages = api
+            .list_messages(MessageQuery {
+                account_id: Some(account.id.clone()),
+                folder_id: Some(sent.id.clone()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+
+        assert_eq!(sent_messages.len(), 1);
+        assert_eq!(sent_messages[0].uid, None);
+        assert_eq!(sent_messages[0].sender, account.email);
+        assert_eq!(sent_messages[0].recipients, vec!["sec@example.com"]);
+        assert_eq!(sent_messages[0].cc, vec!["ops-lead@example.com"]);
+        assert_eq!(sent_messages[0].subject, "Confirm send");
+        assert_eq!(
+            sent_messages[0].body.as_deref(),
+            Some("body\nwith local visibility")
+        );
+        assert!(sent_messages[0]
+            .body_preview
+            .contains("body\nwith local visibility"));
+        assert!(sent_messages[0].flags.is_read);
+        assert!(sent_messages[0].flags.is_answered);
+
+        let updated_sent = api.store.get_folder(&sent.id).unwrap();
+        assert_eq!(updated_sent.total_count, 1);
+        assert_eq!(updated_sent.unread_count, 0);
+    }
+
+    #[tokio::test]
+    async fn send_message_creates_fallback_sent_folder_for_local_placeholder() {
         let protocol = RecordingProtocol::default();
         let sends = Arc::clone(&protocol.sends);
         let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
@@ -2079,8 +2410,277 @@ mod tests {
                 account_id: account.id.clone(),
                 to: vec!["sec@example.com".to_string()],
                 cc: Vec::new(),
+                subject: "Fallback sent".to_string(),
+                body: "body".to_string(),
+                message_id_header: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(sends.lock().is_empty());
+        assert!(!pending_id.is_empty());
+        let sent = api
+            .store
+            .find_folder_by_role(&account.id, FolderRole::Sent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(sent.id, format!("{}:sent", account.id));
+        assert_eq!(sent.path, "Sent");
+        assert_eq!(sent.total_count, 1);
+    }
+
+    #[tokio::test]
+    async fn reject_pending_send_soft_deletes_local_sent_placeholder() {
+        let protocol = RecordingProtocol::default();
+        let sends = Arc::clone(&protocol.sends);
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        let sent = save_sent_folder(&api, &account);
+
+        let pending_id = api
+            .send_message(SendMessageDraft {
+                account_id: account.id.clone(),
+                to: vec!["sec@example.com".to_string()],
+                cc: Vec::new(),
                 subject: "Reject send".to_string(),
                 body: "body".to_string(),
+                message_id_header: None,
+            })
+            .await
+            .unwrap();
+
+        api.reject_action(pending_id).unwrap();
+
+        assert!(sends.lock().is_empty());
+        assert!(api
+            .list_messages(MessageQuery {
+                account_id: Some(account.id.clone()),
+                folder_id: Some(sent.id.clone()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap()
+            .is_empty());
+        let updated_sent = api.store.get_folder(&sent.id).unwrap();
+        assert_eq!(updated_sent.total_count, 0);
+        assert_eq!(updated_sent.unread_count, 0);
+    }
+
+    #[tokio::test]
+    async fn reject_pending_send_keeps_hydrated_sent_placeholder_visible() {
+        let protocol = RecordingProtocol::default();
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        let sent = save_sent_folder(&api, &account);
+
+        let pending_id = api
+            .send_message(SendMessageDraft {
+                account_id: account.id.clone(),
+                to: vec!["sec@example.com".to_string()],
+                cc: Vec::new(),
+                subject: "Reject hydrated send".to_string(),
+                body: "body".to_string(),
+                message_id_header: None,
+            })
+            .await
+            .unwrap();
+        let pending = api.store.get_pending_action(&pending_id).unwrap();
+        let mut remote = api
+            .store
+            .get_message(pending.local_message_id.as_deref().unwrap())
+            .unwrap();
+        remote.id = format!("{}:{}:777", account.id, sent.id);
+        remote.uid = Some("777".to_string());
+        api.store.upsert_message(&remote).unwrap();
+
+        api.reject_action(pending_id).unwrap();
+
+        let sent_messages = api
+            .list_messages(MessageQuery {
+                account_id: Some(account.id.clone()),
+                folder_id: Some(sent.id.clone()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(sent_messages.len(), 1);
+        assert_eq!(sent_messages[0].uid.as_deref(), Some("777"));
+        assert_eq!(api.store.get_folder(&sent.id).unwrap().total_count, 1);
+    }
+
+    #[tokio::test]
+    async fn reject_pending_send_keeps_wrongly_linked_non_sent_message_visible() {
+        let protocol = RecordingProtocol::default();
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        api.sync_account(account.id.clone()).await.unwrap();
+        save_sent_folder(&api, &account);
+        let inbox = api
+            .store
+            .find_folder_by_role(&account.id, FolderRole::Inbox)
+            .unwrap()
+            .unwrap();
+
+        let pending_id = api
+            .send_message(SendMessageDraft {
+                account_id: account.id.clone(),
+                to: vec!["sec@example.com".to_string()],
+                cc: Vec::new(),
+                subject: "Wrong link send".to_string(),
+                body: "body".to_string(),
+                message_id_header: None,
+            })
+            .await
+            .unwrap();
+        let pending = api.store.get_pending_action(&pending_id).unwrap();
+        let linked_id = pending.local_message_id.unwrap();
+        api.store
+            .move_messages_and_clear_uids(std::slice::from_ref(&linked_id), &inbox.id)
+            .unwrap();
+        api.store.refresh_folder_counts(&inbox.id).unwrap();
+
+        api.reject_action(pending_id).unwrap();
+
+        let linked = api.store.get_message(&linked_id).unwrap();
+        assert_eq!(linked.folder_id, inbox.id);
+        assert!(linked.deleted_at.is_none());
+        assert_eq!(api.store.get_folder(&inbox.id).unwrap().total_count, 2);
+    }
+
+    #[tokio::test]
+    async fn sent_sync_moves_fallback_placeholder_to_real_sent_folder_before_hydration() {
+        let sent_message_id = Arc::new(Mutex::new(None));
+        let protocol = SentConvergenceProtocol {
+            sent_message_id: Arc::clone(&sent_message_id),
+        };
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+
+        let pending_id = api
+            .send_message(SendMessageDraft {
+                account_id: account.id.clone(),
+                to: vec!["sec@example.com".to_string()],
+                cc: Vec::new(),
+                subject: "Converge sent".to_string(),
+                body: "body".to_string(),
+                message_id_header: None,
+            })
+            .await
+            .unwrap();
+        let pending = api.store.get_pending_action(&pending_id).unwrap();
+        *sent_message_id.lock() = pending.draft.unwrap().message_id_header;
+
+        api.sync_account(account.id.clone()).await.unwrap();
+
+        let real_sent = api
+            .store
+            .get_folder(&format!("{}:gmail--sent-mail", account.id))
+            .unwrap();
+        let real_sent_messages = api
+            .list_messages(MessageQuery {
+                account_id: Some(account.id.clone()),
+                folder_id: Some(real_sent.id.clone()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(real_sent_messages.len(), 1);
+        assert_eq!(real_sent_messages[0].id, pending.local_message_id.unwrap());
+        assert_eq!(real_sent_messages[0].uid.as_deref(), Some("501"));
+        assert_eq!(
+            api.store
+                .get_folder(&format!("{}:sent", account.id))
+                .unwrap()
+                .total_count,
+            0
+        );
+        assert_eq!(real_sent.total_count, 1);
+    }
+
+    #[tokio::test]
+    async fn confirm_send_passes_generated_message_id_header_to_protocol() {
+        let protocol = RecordingProtocol::default();
+        let sends = Arc::clone(&protocol.sends);
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        save_sent_folder(&api, &account);
+
+        let pending_id = api
+            .send_message(SendMessageDraft {
+                account_id: account.id.clone(),
+                to: vec!["sec@example.com".to_string()],
+                cc: Vec::new(),
+                subject: "Confirm send".to_string(),
+                body: "body".to_string(),
+                message_id_header: None,
+            })
+            .await
+            .unwrap();
+        let pending = api.store.get_pending_action(&pending_id).unwrap();
+        let expected_message_id = pending.draft.unwrap().message_id_header.unwrap();
+
+        api.confirm_action(pending_id).await.unwrap();
+
+        let sends = sends.lock();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(
+            sends[0].message_id_header.as_deref(),
+            Some(expected_message_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_send_confirmation_soft_deletes_local_sent_placeholder() {
+        let protocol = RecordingProtocol {
+            fail_sends: true,
+            ..RecordingProtocol::default()
+        };
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        let sent = save_sent_folder(&api, &account);
+
+        let pending_id = api
+            .send_message(SendMessageDraft {
+                account_id: account.id.clone(),
+                to: vec!["sec@example.com".to_string()],
+                cc: Vec::new(),
+                subject: "Fail send".to_string(),
+                body: "body".to_string(),
+                message_id_header: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(api.confirm_action(pending_id).await.is_err());
+
+        assert!(api
+            .list_messages(MessageQuery {
+                account_id: Some(account.id.clone()),
+                folder_id: Some(sent.id.clone()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap()
+            .is_empty());
+        assert_eq!(api.store.get_folder(&sent.id).unwrap().total_count, 0);
+    }
+
+    #[tokio::test]
+    async fn reject_pending_action_does_not_execute_protocol() {
+        let protocol = RecordingProtocol::default();
+        let sends = Arc::clone(&protocol.sends);
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        save_sent_folder(&api, &account);
+
+        let pending_id = api
+            .send_message(SendMessageDraft {
+                account_id: account.id.clone(),
+                to: vec!["sec@example.com".to_string()],
+                cc: Vec::new(),
+                subject: "Reject send".to_string(),
+                body: "body".to_string(),
+                message_id_header: None,
             })
             .await
             .unwrap();
@@ -2107,6 +2707,20 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    fn save_sent_folder(api: &AppApi, account: &MailAccount) -> MailFolder {
+        let folder = MailFolder {
+            id: format!("{}:sent", account.id),
+            account_id: account.id.clone(),
+            name: "Sent".to_string(),
+            path: "Sent".to_string(),
+            role: FolderRole::Sent,
+            unread_count: 0,
+            total_count: 0,
+        };
+        api.store.save_folder(&folder).unwrap();
+        folder
     }
 
     fn first_message(api: &AppApi, account_id: &str) -> MailMessage {
@@ -2165,6 +2779,7 @@ mod tests {
         actions: Arc<Mutex<Vec<RemoteMailAction>>>,
         sends: Arc<Mutex<Vec<SendMessageDraft>>>,
         fail_actions: bool,
+        fail_sends: bool,
         trash_refetch_uid: Arc<Mutex<Option<String>>>,
     }
 
@@ -2174,6 +2789,7 @@ mod tests {
                 actions: Arc::new(Mutex::new(Vec::new())),
                 sends: Arc::new(Mutex::new(Vec::new())),
                 fail_actions: false,
+                fail_sends: false,
                 trash_refetch_uid: Arc::new(Mutex::new(None)),
             }
         }
@@ -2243,6 +2859,92 @@ mod tests {
             Self {
                 outcome: Ok(mail_core::FolderWatchOutcome::Timeout),
             }
+        }
+    }
+
+    struct SentConvergenceProtocol {
+        sent_message_id: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl MailProtocol for SentConvergenceProtocol {
+        async fn test_connection(
+            &self,
+            _settings: &ConnectionSettings,
+        ) -> ProtocolResult<ConnectionTestResult> {
+            Ok(ConnectionTestResult {
+                imap_ok: true,
+                smtp_ok: true,
+                message: "ok".to_string(),
+            })
+        }
+
+        async fn fetch_folders(
+            &self,
+            _settings: &ConnectionSettings,
+            account: &MailAccount,
+        ) -> ProtocolResult<Vec<MailFolder>> {
+            Ok(vec![MailFolder {
+                id: format!("{}:gmail--sent-mail", account.id),
+                account_id: account.id.clone(),
+                name: "Sent Mail".to_string(),
+                path: "[Gmail]/Sent Mail".to_string(),
+                role: FolderRole::Sent,
+                unread_count: 0,
+                total_count: 0,
+            }])
+        }
+
+        async fn fetch_messages(
+            &self,
+            _settings: &ConnectionSettings,
+            account: &MailAccount,
+            folder: &MailFolder,
+            _request: &MessageFetchRequest,
+        ) -> ProtocolResult<Vec<MailMessage>> {
+            let Some(message_id_header) = self.sent_message_id.lock().clone() else {
+                return Ok(Vec::new());
+            };
+            Ok(vec![MailMessage {
+                id: format!("{}:{}:501", account.id, folder.id),
+                account_id: account.id.clone(),
+                folder_id: folder.id.clone(),
+                uid: Some("501".to_string()),
+                message_id_header: Some(message_id_header),
+                subject: "Converge sent".to_string(),
+                sender: account.email.clone(),
+                recipients: vec!["sec@example.com".to_string()],
+                cc: Vec::new(),
+                received_at: now_rfc3339(),
+                body_preview: "body".to_string(),
+                body: Some("body".to_string()),
+                attachments: Vec::new(),
+                flags: mail_core::MessageFlags {
+                    is_read: true,
+                    is_starred: false,
+                    is_answered: true,
+                    is_forwarded: false,
+                },
+                size_bytes: Some(128),
+                deleted_at: None,
+            }])
+        }
+
+        async fn send_message(
+            &self,
+            _settings: &ConnectionSettings,
+            _draft: &SendMessageDraft,
+        ) -> ProtocolResult<String> {
+            Ok(new_id())
+        }
+
+        async fn apply_action(
+            &self,
+            _settings: &ConnectionSettings,
+            _account: &MailAccount,
+            _action: &RemoteMailAction,
+        ) -> ProtocolResult<()> {
+            Ok(())
         }
     }
 
@@ -2439,6 +3141,9 @@ mod tests {
             _settings: &ConnectionSettings,
             draft: &SendMessageDraft,
         ) -> ProtocolResult<String> {
+            if self.fail_sends {
+                return Err(ProtocolError::Send("forced send failure".to_string()));
+            }
             self.sends.lock().push(draft.clone());
             Ok("sent-id".to_string())
         }

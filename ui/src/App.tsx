@@ -23,7 +23,18 @@ import {
   X
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import {
+  CSSProperties,
+  FormEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useTransition
+} from "react";
 import {
   AccountConfigView,
   AiInsight,
@@ -59,6 +70,11 @@ const defaultAccountConfigForm: SaveAccountConfigRequest = {
 export const MAIL_SYNC_EVENT = "agentmail-mail-sync";
 export const AUTO_SYNC_INTERVAL_MS = 30_000;
 export const THEME_MODE_STORAGE_KEY = "agentmail-theme-mode";
+export const WORKSPACE_SPLIT_STORAGE_KEY = "agentmail-workspace-split-percent";
+export const DEFAULT_WORKSPACE_SPLIT_PERCENT = 45;
+const WORKSPACE_LIST_MIN_WIDTH = 320;
+const WORKSPACE_DETAIL_MIN_WIDTH = 420;
+const WORKSPACE_DIVIDER_WIDTH = 8;
 
 export type ThemeMode = "dark" | "light";
 
@@ -129,6 +145,56 @@ export function applyThemeModeToDocument(
   root.style.colorScheme = mode;
   try {
     storage?.setItem(THEME_MODE_STORAGE_KEY, mode);
+  } catch {
+    // Storage can be unavailable in hardened desktop/webview contexts.
+  }
+}
+
+export function clampWorkspaceSplitPercent(
+  percent: number,
+  containerWidth: number,
+  minListWidth: number,
+  minDetailWidth: number
+) {
+  return getWorkspaceSplitModel(percent, containerWidth, minListWidth, minDetailWidth).percent;
+}
+
+export function getWorkspaceSplitModel(
+  percent: number,
+  containerWidth: number | null | undefined,
+  minListWidth: number,
+  minDetailWidth: number
+) {
+  if (!Number.isFinite(percent)) {
+    return { percent: DEFAULT_WORKSPACE_SPLIT_PERCENT, minPercent: 0, maxPercent: 100 };
+  }
+  if (!Number.isFinite(containerWidth) || !containerWidth || containerWidth < minListWidth + minDetailWidth) {
+    return { percent: 50, minPercent: 50, maxPercent: 50 };
+  }
+  const minPercent = (minListWidth / containerWidth) * 100;
+  const maxPercent = 100 - (minDetailWidth / containerWidth) * 100;
+  const clampedPercent = Math.min(Math.max(percent, minPercent), maxPercent);
+  return {
+    percent: clampedPercent,
+    minPercent,
+    maxPercent
+  };
+}
+
+export function readStoredWorkspaceSplitPercent(storage: Pick<Storage, "getItem"> | null | undefined) {
+  try {
+    const stored = storage?.getItem(WORKSPACE_SPLIT_STORAGE_KEY);
+    if (!stored) return DEFAULT_WORKSPACE_SPLIT_PERCENT;
+    const percent = Number(stored);
+    return Number.isFinite(percent) && percent > 0 && percent < 100 ? percent : DEFAULT_WORKSPACE_SPLIT_PERCENT;
+  } catch {
+    return DEFAULT_WORKSPACE_SPLIT_PERCENT;
+  }
+}
+
+function writeStoredWorkspaceSplitPercent(storage: Pick<Storage, "setItem"> | null | undefined, percent: number) {
+  try {
+    storage?.setItem(WORKSPACE_SPLIT_STORAGE_KEY, String(percent));
   } catch {
     // Storage can be unavailable in hardened desktop/webview contexts.
   }
@@ -309,7 +375,13 @@ export function App() {
   const [themeMode, setThemeMode] = useState<ThemeMode>(() =>
     typeof window === "undefined" ? "dark" : readStoredThemeMode(window.localStorage)
   );
+  const [workspaceSplitPercent, setWorkspaceSplitPercent] = useState(() =>
+    typeof window === "undefined" ? DEFAULT_WORKSPACE_SPLIT_PERCENT : readStoredWorkspaceSplitPercent(window.localStorage)
+  );
+  const [workspaceAvailableWidth, setWorkspaceAvailableWidth] = useState<number | null>(null);
+  const [isWorkspaceResizing, setWorkspaceResizing] = useState(false);
   const [isPending, startTransition] = useTransition();
+  const mailWorkspaceRef = useRef<HTMLDivElement | null>(null);
   const messagesRef = useRef<MailMessage[]>([]);
   const selectedAccountIdRef = useRef<string | null>(null);
   const selectedAccountSyncEnabledRef = useRef(true);
@@ -322,6 +394,29 @@ export function App() {
     if (typeof document === "undefined") return;
     applyThemeModeToDocument(document.documentElement, typeof window === "undefined" ? null : window.localStorage, themeMode);
   }, [themeMode]);
+
+  const workspaceSplitModel = useMemo(
+    () =>
+      getWorkspaceSplitModel(
+        workspaceSplitPercent,
+        workspaceAvailableWidth,
+        WORKSPACE_LIST_MIN_WIDTH,
+        WORKSPACE_DETAIL_MIN_WIDTH
+      ),
+    [workspaceAvailableWidth, workspaceSplitPercent]
+  );
+
+  useEffect(() => {
+    if (workspaceAvailableWidth === null) return;
+    setWorkspaceSplitPercent((current) =>
+      getWorkspaceSplitModel(current, workspaceAvailableWidth, WORKSPACE_LIST_MIN_WIDTH, WORKSPACE_DETAIL_MIN_WIDTH).percent
+    );
+  }, [workspaceAvailableWidth]);
+
+  useEffect(() => {
+    if (workspaceAvailableWidth === null) return;
+    writeStoredWorkspaceSplitPercent(typeof window === "undefined" ? null : window.localStorage, workspaceSplitModel.percent);
+  }, [workspaceAvailableWidth, workspaceSplitModel.percent]);
 
   const selectedAccount = useMemo(
     () => accounts.find((account) => account.id === selectedAccountId) ?? null,
@@ -689,6 +784,111 @@ export function App() {
     [isActionRunning, isAnalyzing, refreshAudits, refreshPendingActions, selectedAccountId]
   );
 
+  const measureWorkspaceAvailableWidth = useCallback(() => {
+    const workspace = mailWorkspaceRef.current;
+    if (!workspace) return;
+    const rect = workspace.getBoundingClientRect();
+    setWorkspaceAvailableWidth(Math.max(0, rect.width - WORKSPACE_DIVIDER_WIDTH));
+  }, []);
+
+  useEffect(() => {
+    measureWorkspaceAvailableWidth();
+    const workspace = mailWorkspaceRef.current;
+    if (!workspace) return undefined;
+
+    const resizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => {
+            measureWorkspaceAvailableWidth();
+          });
+    resizeObserver?.observe(workspace);
+    window.addEventListener("resize", measureWorkspaceAvailableWidth);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", measureWorkspaceAvailableWidth);
+    };
+  }, [measureWorkspaceAvailableWidth]);
+
+  const updateWorkspaceSplitFromClientX = useCallback((clientX: number) => {
+    const workspace = mailWorkspaceRef.current;
+    if (!workspace) return;
+    const rect = workspace.getBoundingClientRect();
+    const availableWidth = Math.max(0, rect.width - WORKSPACE_DIVIDER_WIDTH);
+    if (availableWidth <= 0) return;
+    setWorkspaceAvailableWidth(availableWidth);
+    const rawPercent = ((clientX - rect.left) / availableWidth) * 100;
+    setWorkspaceSplitPercent(
+      clampWorkspaceSplitPercent(rawPercent, availableWidth, WORKSPACE_LIST_MIN_WIDTH, WORKSPACE_DETAIL_MIN_WIDTH)
+    );
+  }, []);
+
+  const stopWorkspaceResize = useCallback(() => {
+    setWorkspaceResizing(false);
+  }, []);
+
+  const handleWorkspaceDividerPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) return;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.preventDefault();
+      setWorkspaceResizing(true);
+      updateWorkspaceSplitFromClientX(event.clientX);
+    },
+    [updateWorkspaceSplitFromClientX]
+  );
+
+  const handleWorkspaceDividerKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 10 : 2;
+    const rect = mailWorkspaceRef.current?.getBoundingClientRect();
+    const availableWidth = rect ? Math.max(0, rect.width - WORKSPACE_DIVIDER_WIDTH) : 1000;
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      setWorkspaceSplitPercent((current) =>
+        clampWorkspaceSplitPercent(current - step, availableWidth, WORKSPACE_LIST_MIN_WIDTH, WORKSPACE_DETAIL_MIN_WIDTH)
+      );
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      setWorkspaceSplitPercent((current) =>
+        clampWorkspaceSplitPercent(current + step, availableWidth, WORKSPACE_LIST_MIN_WIDTH, WORKSPACE_DETAIL_MIN_WIDTH)
+      );
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      setWorkspaceSplitPercent(clampWorkspaceSplitPercent(35, availableWidth, WORKSPACE_LIST_MIN_WIDTH, WORKSPACE_DETAIL_MIN_WIDTH));
+    } else if (event.key === "End") {
+      event.preventDefault();
+      setWorkspaceSplitPercent(clampWorkspaceSplitPercent(65, availableWidth, WORKSPACE_LIST_MIN_WIDTH, WORKSPACE_DETAIL_MIN_WIDTH));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isWorkspaceResizing) return;
+    const handlePointerMove = (event: PointerEvent) => {
+      event.preventDefault();
+      updateWorkspaceSplitFromClientX(event.clientX);
+    };
+    const handlePointerUp = () => stopWorkspaceResize();
+    document.body.classList.add("workspace-resizing");
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp, { once: true });
+    window.addEventListener("pointercancel", handlePointerUp, { once: true });
+    window.addEventListener("blur", handlePointerUp, { once: true });
+    return () => {
+      document.body.classList.remove("workspace-resizing");
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+      window.removeEventListener("blur", handlePointerUp);
+    };
+  }, [isWorkspaceResizing, stopWorkspaceResize, updateWorkspaceSplitFromClientX]);
+
+  const workspaceStyle = {
+    "--workspace-list-percent": `${workspaceSplitModel.percent}%`
+  } as CSSProperties;
+  const splitValueText = `Message list ${Math.round(workspaceSplitModel.percent)} percent, detail ${Math.round(
+    100 - workspaceSplitModel.percent
+  )} percent`;
+
   return (
     <main className="app-shell">
       <section className="topbar">
@@ -752,114 +952,133 @@ export function App() {
           </nav>
         </aside>
 
-        <section className="message-column" aria-label="Messages">
-          <div className="column-header">
-            <div>
-              <span>{selectedFolder?.name ?? "NO FOLDER"}</span>
-              <strong>{messages.length} ROWS</strong>
-            </div>
-            <div className="health-chip">
-              <ShieldCheck size={14} />
-              {aiHeaderStatus}
-            </div>
-          </div>
-          <div className="message-list">
-            {messages.map((message) => (
-              <button
-                className={`message-row ${message.id === selectedMessageId ? "active" : ""} ${message.flags.is_read ? "read" : "unread"}`}
-                key={message.id}
-                type="button"
-                onClick={() => setSelectedMessageId(message.id)}
-              >
-                <span className="row-status">{message.flags.is_starred ? <Star size={14} fill="currentColor" /> : <Clock3 size={14} />}</span>
-                <span className="row-main">
-                  <strong>{message.subject}</strong>
-                  <small>{message.sender}</small>
-                  <em>{message.body_preview}</em>
-                </span>
-                <time>{formatTime(message.received_at)}</time>
-              </button>
-            ))}
-            {messages.length === 0 ? <div className="empty-state">No indexed mail in this folder.</div> : null}
-          </div>
-        </section>
-
-        <section className="detail-pane" aria-label="Message detail">
-          {selectedMessage ? (
-            <>
-              <div className="detail-toolbar">
-                <button
-                  type="button"
-                  onClick={() => runAction(selectedMessage.flags.is_read ? "mark_unread" : "mark_read")}
-                  disabled={isActionRunning || isAnalyzing}
-                >
-                  <CheckCheck size={15} />
-                  {selectedMessage.flags.is_read ? "UNREAD" : "READ"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => runAction(selectedMessage.flags.is_starred ? "unstar" : "star")}
-                  disabled={isActionRunning || isAnalyzing}
-                >
-                  <Star size={15} />
-                  {selectedMessage.flags.is_starred ? "UNSTAR" : "STAR"}
-                </button>
-                <button type="button" onClick={() => runAction("delete")} disabled={isActionRunning || isAnalyzing}>
-                  <Trash2 size={15} />
-                  DELETE
-                </button>
+        <div className="mail-workspace" ref={mailWorkspaceRef} style={workspaceStyle}>
+          <section className="message-column" aria-label="Messages">
+            <div className="column-header">
+              <div>
+                <span>{selectedFolder?.name ?? "NO FOLDER"}</span>
+                <strong>{messages.length} ROWS</strong>
               </div>
-              <article className="message-detail">
-                <div className="message-heading">
-                  <span className={selectedMessage.flags.is_read ? "read-dot" : "unread-dot"} />
-                  <h1>{selectedMessage.subject}</h1>
-                </div>
-                <dl className="metadata-grid">
-                  <div>
-                    <dt>FROM</dt>
-                    <dd>{selectedMessage.sender}</dd>
-                  </div>
-                  <div>
-                    <dt>TO</dt>
-                    <dd>{selectedMessage.recipients.join(", ")}</dd>
-                  </div>
-                  <div>
-                    <dt>UID</dt>
-                    <dd>{selectedMessage.uid ?? "LOCAL"}</dd>
-                  </div>
-                  <div>
-                    <dt>SIZE</dt>
-                    <dd>{formatSize(selectedMessage.size_bytes)}</dd>
-                  </div>
-                </dl>
-                <pre className="body-block">{selectedMessage.body ?? selectedMessage.body_preview}</pre>
-                {selectedMessage.attachments.length > 0 ? (
-                  <div className="attachment-strip">
-                    {selectedMessage.attachments.map((attachment) => (
-                      <span key={attachment.id}>
-                        <Database size={14} />
-                        {attachment.filename}
-                      </span>
-                    ))}
-                  </div>
-                ) : null}
-              </article>
-              <AiPanel
-                settings={aiSettings}
-                insights={aiInsights}
-                status={aiStatus}
-                isAnalyzing={isAnalyzing}
-                isActionRunning={isActionRunning}
-                onAnalyze={handleAnalyze}
-              />
-            </>
-          ) : (
-            <div className="empty-detail">
-              <BellDot size={24} />
-              Select a message to inspect headers and body.
+              <div className="health-chip">
+                <ShieldCheck size={14} />
+                {aiHeaderStatus}
+              </div>
             </div>
-          )}
-        </section>
+            <div className="message-list">
+              {messages.map((message) => (
+                <button
+                  className={`message-row ${message.id === selectedMessageId ? "active" : ""} ${message.flags.is_read ? "read" : "unread"}`}
+                  key={message.id}
+                  type="button"
+                  onClick={() => setSelectedMessageId(message.id)}
+                >
+                  <span className="row-status">{message.flags.is_starred ? <Star size={14} fill="currentColor" /> : <Clock3 size={14} />}</span>
+                  <span className="row-main">
+                    <strong>{message.subject}</strong>
+                    <small>{message.sender}</small>
+                    <em>{message.body_preview}</em>
+                  </span>
+                  <time>{formatTime(message.received_at)}</time>
+                </button>
+              ))}
+              {messages.length === 0 ? <div className="empty-state">No indexed mail in this folder.</div> : null}
+            </div>
+          </section>
+
+          <div
+            className={`workspace-divider ${isWorkspaceResizing ? "active" : ""}`}
+            role="separator"
+            aria-label="Resize message list and detail panes"
+            aria-orientation="vertical"
+            aria-valuemin={Math.round(workspaceSplitModel.minPercent)}
+            aria-valuemax={Math.round(workspaceSplitModel.maxPercent)}
+            aria-valuenow={Math.round(workspaceSplitModel.percent)}
+            aria-valuetext={splitValueText}
+            tabIndex={0}
+            onPointerDown={handleWorkspaceDividerPointerDown}
+            onLostPointerCapture={stopWorkspaceResize}
+            onKeyDown={handleWorkspaceDividerKeyDown}
+          />
+
+          <section className="detail-pane" aria-label="Message detail">
+            {selectedMessage ? (
+              <>
+                <div className="detail-toolbar">
+                  <button
+                    type="button"
+                    onClick={() => runAction(selectedMessage.flags.is_read ? "mark_unread" : "mark_read")}
+                    disabled={isActionRunning || isAnalyzing}
+                  >
+                    <CheckCheck size={15} />
+                    {selectedMessage.flags.is_read ? "UNREAD" : "READ"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => runAction(selectedMessage.flags.is_starred ? "unstar" : "star")}
+                    disabled={isActionRunning || isAnalyzing}
+                  >
+                    <Star size={15} />
+                    {selectedMessage.flags.is_starred ? "UNSTAR" : "STAR"}
+                  </button>
+                  <button type="button" onClick={() => runAction("delete")} disabled={isActionRunning || isAnalyzing}>
+                    <Trash2 size={15} />
+                    DELETE
+                  </button>
+                </div>
+                <div className="detail-scroll">
+                  <article className="message-detail">
+                    <div className="message-heading">
+                      <span className={selectedMessage.flags.is_read ? "read-dot" : "unread-dot"} />
+                      <h1>{selectedMessage.subject}</h1>
+                    </div>
+                    <dl className="metadata-grid">
+                      <div>
+                        <dt>FROM</dt>
+                        <dd>{selectedMessage.sender}</dd>
+                      </div>
+                      <div>
+                        <dt>TO</dt>
+                        <dd>{selectedMessage.recipients.join(", ")}</dd>
+                      </div>
+                      <div>
+                        <dt>UID</dt>
+                        <dd>{selectedMessage.uid ?? "LOCAL"}</dd>
+                      </div>
+                      <div>
+                        <dt>SIZE</dt>
+                        <dd>{formatSize(selectedMessage.size_bytes)}</dd>
+                      </div>
+                    </dl>
+                    <pre className="body-block">{selectedMessage.body ?? selectedMessage.body_preview}</pre>
+                    {selectedMessage.attachments.length > 0 ? (
+                      <div className="attachment-strip">
+                        {selectedMessage.attachments.map((attachment) => (
+                          <span key={attachment.id}>
+                            <Database size={14} />
+                            {attachment.filename}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </article>
+                  <AiPanel
+                    settings={aiSettings}
+                    insights={aiInsights}
+                    status={aiStatus}
+                    isAnalyzing={isAnalyzing}
+                    isActionRunning={isActionRunning}
+                    onAnalyze={handleAnalyze}
+                  />
+                </div>
+              </>
+            ) : (
+              <div className="empty-detail">
+                <BellDot size={24} />
+                Select a message to inspect headers and body.
+              </div>
+            )}
+          </section>
+        </div>
       </section>
 
       <footer className="status-console">
