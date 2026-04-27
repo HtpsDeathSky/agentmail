@@ -14,7 +14,10 @@ use mail_core::{
     MailActionRequest, MailActionResult, MailFolder, MailMessage, MessageQuery, PendingMailAction,
     SaveAiSettingsRequest, SendMessageDraft, SyncState,
 };
-use tauri::{Manager, State};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager, State};
+
+const MAIL_SYNC_EVENT: &str = "agentmail-mail-sync";
 
 struct ApiState {
     api: Arc<AppApi>,
@@ -23,6 +26,14 @@ struct ApiState {
 #[derive(Clone, Default)]
 struct WatcherRegistry {
     active: Arc<Mutex<HashSet<String>>>,
+}
+
+#[derive(Clone, Serialize)]
+struct MailSyncEventPayload {
+    account_id: String,
+    folder_id: Option<String>,
+    reason: &'static str,
+    message: Option<String>,
 }
 
 #[tauri::command]
@@ -80,11 +91,17 @@ async fn sync_account(
 
 #[tauri::command]
 fn start_account_watchers(
+    app: AppHandle,
     state: State<'_, ApiState>,
     registry: State<'_, WatcherRegistry>,
     account_id: String,
 ) -> Result<(), String> {
-    start_account_watchers_for_api(Arc::clone(&state.api), registry.inner().clone(), account_id)
+    start_account_watchers_for_api(
+        Arc::clone(&state.api),
+        registry.inner().clone(),
+        app,
+        account_id,
+    )
 }
 
 #[tauri::command]
@@ -235,6 +252,7 @@ fn remove_watcher(registry: &WatcherRegistry, account_id: &str, folder_id: &str)
 fn start_account_watchers_for_api(
     api: Arc<AppApi>,
     registry: WatcherRegistry,
+    app: AppHandle,
     account_id: String,
 ) -> Result<(), String> {
     if !api.is_account_sync_enabled(&account_id).map_err(to_error)? {
@@ -246,6 +264,7 @@ fn start_account_watchers_for_api(
         start_folder_watcher(
             Arc::clone(&api),
             registry.clone(),
+            app.clone(),
             account_id.clone(),
             folder.id,
         );
@@ -256,6 +275,7 @@ fn start_account_watchers_for_api(
 fn start_folder_watcher(
     api: Arc<AppApi>,
     registry: WatcherRegistry,
+    app: AppHandle,
     account_id: String,
     folder_id: String,
 ) {
@@ -287,7 +307,21 @@ fn start_folder_watcher(
                     }
 
                     match api.sync_account(account_id.clone()).await {
-                        Ok(_) | Err(ApiError::SyncAlreadyRunning(_)) => {}
+                        Ok(summary) => {
+                            emit_mail_sync_event(
+                                &app,
+                                MailSyncEventPayload {
+                                    account_id: summary.account_id,
+                                    folder_id: Some(folder_id.clone()),
+                                    reason: "watch_changed",
+                                    message: Some(format!(
+                                        "{} folders / {} messages",
+                                        summary.folders, summary.messages
+                                    )),
+                                },
+                            );
+                        }
+                        Err(ApiError::SyncAlreadyRunning(_)) => {}
                         Err(_) => {
                             remove_watcher(&registry, &account_id, &folder_id);
                             return;
@@ -296,6 +330,7 @@ fn start_folder_watcher(
                     if start_account_watchers_for_api(
                         Arc::clone(&api),
                         registry.clone(),
+                        app.clone(),
                         account_id.clone(),
                     )
                     .is_err()
@@ -312,6 +347,10 @@ fn start_folder_watcher(
             }
         }
     });
+}
+
+fn emit_mail_sync_event(app: &AppHandle, payload: MailSyncEventPayload) {
+    let _ = app.emit(MAIL_SYNC_EVENT, payload);
 }
 
 fn main() {
@@ -333,14 +372,28 @@ fn main() {
                 api: Arc::clone(&api),
             });
             app.manage(watcher_registry.clone());
+            let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Ok(accounts) = api.list_accounts() {
                     for account in accounts.into_iter().filter(|account| account.sync_enabled) {
                         let account_id = account.id;
-                        if api.sync_account(account_id.clone()).await.is_ok() {
+                        if let Ok(summary) = api.sync_account(account_id.clone()).await {
+                            emit_mail_sync_event(
+                                &app_handle,
+                                MailSyncEventPayload {
+                                    account_id: summary.account_id,
+                                    folder_id: None,
+                                    reason: "startup_sync",
+                                    message: Some(format!(
+                                        "{} folders / {} messages",
+                                        summary.folders, summary.messages
+                                    )),
+                                },
+                            );
                             let _ = start_account_watchers_for_api(
                                 Arc::clone(&api),
                                 watcher_registry.clone(),
+                                app_handle.clone(),
                                 account_id,
                             );
                         }

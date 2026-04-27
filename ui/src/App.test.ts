@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { formatAuditLine, formatFolderCount, formatSendQueuedStatus, runInitialAccountSync } from "./App";
+import { formatAuditLine, formatFolderCount, formatSendQueuedStatus, refreshAfterMailSyncEvent, runInitialAccountSync } from "./App";
 
 describe("formatFolderCount", () => {
   it("shows total count when no messages are unread", () => {
@@ -171,5 +171,61 @@ describe("runInitialAccountSync", () => {
     expect(refreshAudits).toHaveBeenCalled();
     expect(refreshPendingActions).toHaveBeenCalledWith("acct-1");
     expect(status).toBe("account configuration saved: ops@example.com");
+  });
+});
+
+describe("refreshAfterMailSyncEvent", () => {
+  it("refreshes visible account state after a watcher sync event", async () => {
+    const refreshFolders = vi.fn().mockResolvedValue(undefined);
+    const refreshMessages = vi.fn().mockResolvedValue(undefined);
+    const refreshSyncState = vi.fn().mockResolvedValue(undefined);
+    const refreshAudits = vi.fn().mockResolvedValue(undefined);
+    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
+
+    const didRefresh = await refreshAfterMailSyncEvent({
+      payload: { account_id: "acct-1", folder_id: "acct-1:inbox", reason: "watch_changed" },
+      selectedAccountId: "acct-1",
+      selectedFolderId: "acct-1:inbox",
+      query: "",
+      refreshFolders,
+      refreshMessages,
+      refreshSyncState,
+      refreshAudits,
+      refreshPendingActions
+    });
+
+    expect(didRefresh).toBe(true);
+    expect(refreshFolders).toHaveBeenCalledWith("acct-1");
+    expect(refreshMessages).toHaveBeenCalledWith("acct-1", "acct-1:inbox", "");
+    expect(refreshSyncState).toHaveBeenCalledWith("acct-1");
+    expect(refreshAudits).toHaveBeenCalled();
+    expect(refreshPendingActions).toHaveBeenCalledWith("acct-1");
+  });
+
+  it("ignores watcher sync events for a different selected account", async () => {
+    const refreshFolders = vi.fn().mockResolvedValue(undefined);
+    const refreshMessages = vi.fn().mockResolvedValue(undefined);
+    const refreshSyncState = vi.fn().mockResolvedValue(undefined);
+    const refreshAudits = vi.fn().mockResolvedValue(undefined);
+    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
+
+    const didRefresh = await refreshAfterMailSyncEvent({
+      payload: { account_id: "acct-2", folder_id: "acct-2:inbox", reason: "watch_changed" },
+      selectedAccountId: "acct-1",
+      selectedFolderId: "acct-1:inbox",
+      query: "",
+      refreshFolders,
+      refreshMessages,
+      refreshSyncState,
+      refreshAudits,
+      refreshPendingActions
+    });
+
+    expect(didRefresh).toBe(false);
+    expect(refreshFolders).not.toHaveBeenCalled();
+    expect(refreshMessages).not.toHaveBeenCalled();
+    expect(refreshSyncState).not.toHaveBeenCalled();
+    expect(refreshAudits).not.toHaveBeenCalled();
+    expect(refreshPendingActions).not.toHaveBeenCalled();
   });
 });

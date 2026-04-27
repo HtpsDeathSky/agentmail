@@ -11,7 +11,7 @@ use mail_core::{
     MailMessage, MessageFetchRequest, MessageQuery, PendingActionStatus, PendingMailAction,
     RemoteMailAction, SaveAiSettingsRequest, SendMessageDraft, SyncState, SyncStateKind,
 };
-use mail_protocol::{LiveMailProtocol, MailProtocol, ProtocolError};
+use mail_protocol::{validate_mailbox_address, LiveMailProtocol, MailProtocol, ProtocolError};
 use mail_store::{MailStore, MessageFlagPatch, StoreError};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -132,6 +132,7 @@ impl AppApi {
         request: SaveAccountConfigRequest,
     ) -> ApiResult<MailAccount> {
         request.validate()?;
+        let email = normalize_email_address(&request.email)?;
 
         let now = now_rfc3339();
         let existing = match request.id.as_deref() {
@@ -144,7 +145,7 @@ impl AppApi {
                 .map(|account| account.id.clone())
                 .unwrap_or_else(new_id),
             display_name: request.display_name,
-            email: request.email,
+            email,
             imap_host: request.imap_host,
             imap_port: request.imap_port,
             imap_tls: request.imap_tls,
@@ -553,7 +554,7 @@ impl AppApi {
         &self,
         request: MailActionRequest,
     ) -> ApiResult<MailActionResult> {
-        let normalized_action = confirmation_action_for_request(&request);
+        let normalized_action = self.confirmation_action_for_request(&request)?;
         if normalized_action.requires_confirmation() {
             let pending = self.queue_pending_action(
                 request.account_id,
@@ -645,9 +646,15 @@ impl AppApi {
                 };
                 self.execute_confirmed_mail_action(&request).await
             }
-            MailActionKind::PermanentDelete => Err(ApiError::InvalidRequest(
-                "permanent delete is disabled in this release".to_string(),
-            )),
+            MailActionKind::PermanentDelete => {
+                let request = MailActionRequest {
+                    action: MailActionKind::PermanentDelete,
+                    account_id: pending.account_id.clone(),
+                    message_ids: pending.message_ids.clone(),
+                    target_folder_id: None,
+                };
+                self.execute_confirmed_mail_action(&request).await
+            }
             MailActionKind::Forward => Err(ApiError::InvalidRequest(
                 "forward confirmation is not implemented yet".to_string(),
             )),
@@ -781,8 +788,20 @@ impl AppApi {
             ));
         }
         let account = self.store.get_account(&request.account_id)?;
-        let remote_action = self.build_remote_action(&account, request)?;
+        let remote_action = self.build_remote_action(&account, request).await?;
         let settings = self.connection_settings_for_account(&account)?;
+
+        if request.action == MailActionKind::PermanentDelete && remote_action.uids.is_empty() {
+            self.apply_local_action(request, &remote_action)?;
+            self.write_audit(
+                &request.account_id,
+                request.action,
+                request.message_ids.clone(),
+                ActionAuditStatus::Executed,
+                None,
+            )?;
+            return Ok(());
+        }
 
         let result = self
             .protocol
@@ -800,6 +819,20 @@ impl AppApi {
                 )?;
                 Ok(())
             }
+            Err(err)
+                if request.action == MailActionKind::PermanentDelete
+                    && is_missing_remote_message_error(&err) =>
+            {
+                self.apply_local_action(request, &remote_action)?;
+                self.write_audit(
+                    &request.account_id,
+                    request.action,
+                    request.message_ids.clone(),
+                    ActionAuditStatus::Executed,
+                    Some(err.to_string()),
+                )?;
+                Ok(())
+            }
             Err(err) => {
                 self.write_audit(
                     &request.account_id,
@@ -813,7 +846,7 @@ impl AppApi {
         }
     }
 
-    fn build_remote_action(
+    async fn build_remote_action(
         &self,
         account: &MailAccount,
         request: &MailActionRequest,
@@ -848,15 +881,13 @@ impl AppApi {
             ));
         }
 
-        let mut uids = Vec::with_capacity(messages.len());
-        for message in &messages {
-            let uid = message.uid.clone().ok_or_else(|| {
-                ApiError::InvalidRequest(format!("message {} has no remote UID", message.id))
-            })?;
-            uids.push(uid);
-        }
-
         let source_folder = self.store.get_folder(&source_folder_id)?;
+        let uids = if request.action == MailActionKind::PermanentDelete {
+            self.resolve_permanent_delete_uids(account, &source_folder, &messages)
+                .await?
+        } else {
+            require_message_uids(&messages)?
+        };
         let target_folder = match request.action {
             MailActionKind::Move | MailActionKind::BatchMove => {
                 let target_id = request.target_folder_id.as_deref().ok_or_else(|| {
@@ -876,6 +907,7 @@ impl AppApi {
             MailActionKind::Delete | MailActionKind::BatchDelete => {
                 Some(self.required_role_folder(&account.id, FolderRole::Trash)?)
             }
+            MailActionKind::PermanentDelete => None,
             _ => None,
         };
 
@@ -932,6 +964,9 @@ impl AppApi {
                 self.store
                     .move_messages_and_clear_uids(&request.message_ids, &target.id)?;
             }
+            MailActionKind::PermanentDelete => {
+                self.store.soft_delete_messages(&request.message_ids)?
+            }
             _ => {
                 return Err(ApiError::InvalidRequest(format!(
                     "unsupported confirmed mail action: {:?}",
@@ -949,10 +984,73 @@ impl AppApi {
         Ok(())
     }
 
+    async fn resolve_permanent_delete_uids(
+        &self,
+        account: &MailAccount,
+        source_folder: &MailFolder,
+        messages: &[MailMessage],
+    ) -> ApiResult<Vec<String>> {
+        let settings = self.connection_settings_for_account(account)?;
+        let remote_messages = self
+            .protocol
+            .fetch_messages(
+                &settings,
+                account,
+                source_folder,
+                &MessageFetchRequest {
+                    last_uid: None,
+                    limit: 500,
+                },
+            )
+            .await?;
+
+        let mut uids = Vec::with_capacity(messages.len());
+        for message in messages {
+            if let Some(uid) = remote_messages
+                .iter()
+                .find(|candidate| messages_match_for_remote_delete(message, candidate))
+                .and_then(|candidate| candidate.uid.clone())
+            {
+                uids.push(uid);
+            }
+        }
+        Ok(uids)
+    }
+
     fn required_role_folder(&self, account_id: &str, role: FolderRole) -> ApiResult<MailFolder> {
         self.store
             .find_folder_by_role(account_id, role)?
             .ok_or_else(|| ApiError::InvalidRequest(format!("{role:?} folder is not available")))
+    }
+
+    fn confirmation_action_for_request(
+        &self,
+        request: &MailActionRequest,
+    ) -> ApiResult<MailActionKind> {
+        match request.action {
+            MailActionKind::Delete => {
+                if request.message_ids.is_empty() {
+                    return Ok(MailActionKind::Delete);
+                }
+                let first_message = self.store.get_message(&request.message_ids[0])?;
+                if first_message.account_id != request.account_id {
+                    return Err(ApiError::InvalidRequest(format!(
+                        "message {} does not belong to account {}",
+                        first_message.id, request.account_id
+                    )));
+                }
+                let source_folder = self.store.get_folder(&first_message.folder_id)?;
+                if source_folder.role == FolderRole::Trash {
+                    Ok(MailActionKind::PermanentDelete)
+                } else if request.message_ids.len() > 1 {
+                    Ok(MailActionKind::BatchDelete)
+                } else {
+                    Ok(MailActionKind::Delete)
+                }
+            }
+            MailActionKind::Move if request.message_ids.len() > 1 => Ok(MailActionKind::BatchMove),
+            action => Ok(action),
+        }
     }
 
     fn write_audit(
@@ -1061,9 +1159,7 @@ pub struct SaveAccountConfigRequest {
 
 impl SaveAccountConfigRequest {
     fn validate(&self) -> ApiResult<()> {
-        if self.email.trim().is_empty() {
-            return Err(ApiError::InvalidRequest("email is required".to_string()));
-        }
+        normalize_email_address(&self.email)?;
         if self.password.is_empty() {
             return Err(ApiError::InvalidRequest("password is required".to_string()));
         }
@@ -1078,7 +1174,7 @@ impl SaveAccountConfigRequest {
     fn connection_settings(&self, account_id: Option<String>) -> ConnectionSettings {
         ConnectionSettings {
             account_id,
-            email: self.email.clone(),
+            email: self.email.trim().to_string(),
             imap_host: self.imap_host.clone(),
             imap_port: self.imap_port,
             imap_tls: self.imap_tls,
@@ -1146,20 +1242,53 @@ fn backoff_seconds(failure_count: u32) -> i64 {
     (60_i64 * 2_i64.pow(exponent)).min(1_800)
 }
 
-fn confirmation_action_for_request(request: &MailActionRequest) -> MailActionKind {
-    match request.action {
-        MailActionKind::Delete if request.message_ids.len() > 1 => MailActionKind::BatchDelete,
-        MailActionKind::Move if request.message_ids.len() > 1 => MailActionKind::BatchMove,
-        action => action,
-    }
-}
-
 fn required_trimmed(value: String, field: &str) -> ApiResult<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(ApiError::InvalidRequest(format!("{field} is required")));
     }
     Ok(trimmed.to_string())
+}
+
+fn normalize_email_address(value: &str) -> ApiResult<String> {
+    let email = required_trimmed(value.to_string(), "email")?;
+    validate_mailbox_address(&email)
+        .map_err(|_| ApiError::InvalidRequest("email is invalid".to_string()))?;
+    Ok(email)
+}
+
+fn require_message_uids(messages: &[MailMessage]) -> ApiResult<Vec<String>> {
+    let mut uids = Vec::with_capacity(messages.len());
+    for message in messages {
+        let uid = message.uid.clone().ok_or_else(|| {
+            ApiError::InvalidRequest(format!("message {} has no remote UID", message.id))
+        })?;
+        uids.push(uid);
+    }
+    Ok(uids)
+}
+
+fn messages_match_for_remote_delete(local: &MailMessage, remote: &MailMessage) -> bool {
+    local.id == remote.id
+        || local
+            .message_id_header
+            .as_ref()
+            .zip(remote.message_id_header.as_ref())
+            .map(|(left, right)| left == right)
+            .unwrap_or(false)
+        || (local.subject == remote.subject
+            && local.sender == remote.sender
+            && local.received_at == remote.received_at)
+}
+
+fn is_missing_remote_message_error(err: &ProtocolError) -> bool {
+    match err {
+        ProtocolError::Fetch(message) => {
+            let lower = message.to_ascii_lowercase();
+            lower.contains("not exist") || lower.contains("not found")
+        }
+        _ => false,
+    }
 }
 
 fn ai_settings_view(settings: AiSettings) -> AiSettingsView {
@@ -1793,6 +1922,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_account_email_is_rejected_before_save() {
+        let api = AppApi::new(
+            MailStore::memory().unwrap(),
+            Arc::new(RecordingProtocol::default()),
+        );
+
+        let err = api
+            .add_account(AddAccountRequest {
+                display_name: "Ops".to_string(),
+                email: "app test".to_string(),
+                password: "secret".to_string(),
+                imap_host: "imap.example.com".to_string(),
+                imap_port: 993,
+                imap_tls: true,
+                smtp_host: "smtp.example.com".to_string(),
+                smtp_port: 465,
+                smtp_tls: true,
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), "invalid request: email is invalid");
+        assert!(api.list_accounts().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn delete_moves_to_trash_and_clears_local_uid() {
         let protocol = RecordingProtocol::default();
         let actions = Arc::clone(&protocol.actions);
@@ -1822,6 +1977,62 @@ mod tests {
             actions.lock()[0].target_folder.as_ref().unwrap().role,
             FolderRole::Trash
         );
+    }
+
+    #[tokio::test]
+    async fn delete_inside_trash_queues_and_confirms_permanent_delete() {
+        let protocol = RecordingProtocol::default();
+        let actions = Arc::clone(&protocol.actions);
+        let trash_refetch_uid = Arc::clone(&protocol.trash_refetch_uid);
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        api.sync_account(account.id.clone()).await.unwrap();
+        let message = first_message(&api, &account.id);
+
+        api.execute_mail_action(MailActionRequest {
+            action: MailActionKind::Delete,
+            account_id: account.id.clone(),
+            message_ids: vec![message.id.clone()],
+            target_folder_id: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(api.store.get_message(&message.id).unwrap().uid, None);
+        *trash_refetch_uid.lock() = Some("900".to_string());
+
+        let result = api
+            .execute_mail_action(MailActionRequest {
+                action: MailActionKind::Delete,
+                account_id: account.id.clone(),
+                message_ids: vec![message.id.clone()],
+                target_folder_id: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.kind, MailActionResultKind::Pending);
+        let pending_id = result.pending_action_id.unwrap();
+        let pending = api.list_pending_actions(Some(account.id.clone())).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, pending_id);
+        assert_eq!(pending[0].action, MailActionKind::PermanentDelete);
+
+        api.confirm_action(pending_id).await.unwrap();
+
+        let recorded = actions.lock();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[1].action, MailActionKind::PermanentDelete);
+        assert_eq!(recorded[1].source_folder.role, FolderRole::Trash);
+        assert_eq!(recorded[1].target_folder, None);
+        assert_eq!(recorded[1].uids, vec!["900".to_string()]);
+        drop(recorded);
+
+        assert!(api
+            .store
+            .get_message(&message.id)
+            .unwrap()
+            .deleted_at
+            .is_some());
     }
 
     #[tokio::test]
@@ -1954,6 +2165,7 @@ mod tests {
         actions: Arc<Mutex<Vec<RemoteMailAction>>>,
         sends: Arc<Mutex<Vec<SendMessageDraft>>>,
         fail_actions: bool,
+        trash_refetch_uid: Arc<Mutex<Option<String>>>,
     }
 
     impl Default for RecordingProtocol {
@@ -1962,6 +2174,7 @@ mod tests {
                 actions: Arc::new(Mutex::new(Vec::new())),
                 sends: Arc::new(Mutex::new(Vec::new())),
                 fail_actions: false,
+                trash_refetch_uid: Arc::new(Mutex::new(None)),
             }
         }
     }
@@ -2165,6 +2378,34 @@ mod tests {
             folder: &MailFolder,
             _request: &MessageFetchRequest,
         ) -> ProtocolResult<Vec<MailMessage>> {
+            if folder.role == FolderRole::Trash {
+                let Some(uid) = self.trash_refetch_uid.lock().clone() else {
+                    return Ok(Vec::new());
+                };
+                return Ok(vec![MailMessage {
+                    id: format!("{}:{}:{uid}", account.id, folder.id),
+                    account_id: account.id.clone(),
+                    folder_id: folder.id.clone(),
+                    uid: Some(uid.clone()),
+                    message_id_header: Some("<42@example.com>".to_string()),
+                    subject: "Action required".to_string(),
+                    sender: "sec@example.com".to_string(),
+                    recipients: vec![account.email.clone()],
+                    cc: Vec::new(),
+                    received_at: now_rfc3339(),
+                    body_preview: "review".to_string(),
+                    body: Some("review".to_string()),
+                    attachments: Vec::new(),
+                    flags: mail_core::MessageFlags {
+                        is_read: false,
+                        is_starred: false,
+                        is_answered: false,
+                        is_forwarded: false,
+                    },
+                    size_bytes: Some(128),
+                    deleted_at: None,
+                }]);
+            }
             if folder.role != FolderRole::Inbox {
                 return Ok(Vec::new());
             }

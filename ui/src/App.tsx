@@ -20,6 +20,7 @@ import {
   Trash2,
   X
 } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import {
   AccountConfigView,
@@ -51,6 +52,15 @@ const defaultAccountConfigForm: SaveAccountConfigRequest = {
   smtp_port: 465,
   smtp_tls: true,
   sync_enabled: true
+};
+
+export const MAIL_SYNC_EVENT = "agentmail-mail-sync";
+
+export type MailSyncEventPayload = {
+  account_id: string;
+  folder_id?: string | null;
+  reason: string;
+  message?: string | null;
 };
 
 const roleIcon = {
@@ -159,6 +169,43 @@ export async function runInitialAccountSync({
   return `account saved, but initial sync failed: ${String(syncError)}`;
 }
 
+type RefreshAfterMailSyncEventRequest = {
+  payload: MailSyncEventPayload;
+  selectedAccountId: string | null;
+  selectedFolderId: string | null;
+  query: string;
+  refreshFolders: (accountId: string) => Promise<void>;
+  refreshMessages: (accountId: string, folderId: string | null, query: string) => Promise<void>;
+  refreshSyncState: (accountId: string) => Promise<void>;
+  refreshAudits: () => Promise<void>;
+  refreshPendingActions: (accountId: string) => Promise<void>;
+};
+
+export async function refreshAfterMailSyncEvent({
+  payload,
+  selectedAccountId,
+  selectedFolderId,
+  query,
+  refreshFolders,
+  refreshMessages,
+  refreshSyncState,
+  refreshAudits,
+  refreshPendingActions
+}: RefreshAfterMailSyncEventRequest) {
+  if (!selectedAccountId || payload.account_id !== selectedAccountId) {
+    return false;
+  }
+
+  await Promise.allSettled([
+    refreshFolders(payload.account_id),
+    refreshMessages(payload.account_id, selectedFolderId, query),
+    refreshSyncState(payload.account_id),
+    refreshAudits(),
+    refreshPendingActions(payload.account_id)
+  ]);
+  return true;
+}
+
 export function App() {
   const [accounts, setAccounts] = useState<MailAccount[]>([]);
   const [folders, setFolders] = useState<MailFolder[]>([]);
@@ -181,7 +228,10 @@ export function App() {
   const [aiStatus, setAiStatus] = useState("ai link idle");
   const [isPending, startTransition] = useTransition();
   const messagesRef = useRef<MailMessage[]>([]);
+  const selectedAccountIdRef = useRef<string | null>(null);
+  const selectedFolderIdRef = useRef<string | null>(null);
   const selectedMessageIdRef = useRef<string | null>(null);
+  const queryRef = useRef("");
 
   const selectedAccount = useMemo(
     () => accounts.find((account) => account.id === selectedAccountId) ?? null,
@@ -270,8 +320,56 @@ export function App() {
   }, [messages]);
 
   useEffect(() => {
+    selectedAccountIdRef.current = selectedAccountId;
+  }, [selectedAccountId]);
+
+  useEffect(() => {
+    selectedFolderIdRef.current = selectedFolderId;
+  }, [selectedFolderId]);
+
+  useEffect(() => {
     selectedMessageIdRef.current = selectedMessageId;
   }, [selectedMessageId]);
+
+  useEffect(() => {
+    queryRef.current = query;
+  }, [query]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let isCancelled = false;
+
+    void listen<MailSyncEventPayload>(MAIL_SYNC_EVENT, (event) => {
+      void refreshAfterMailSyncEvent({
+        payload: event.payload,
+        selectedAccountId: selectedAccountIdRef.current,
+        selectedFolderId: selectedFolderIdRef.current,
+        query: queryRef.current,
+        refreshFolders,
+        refreshMessages,
+        refreshSyncState,
+        refreshAudits,
+        refreshPendingActions
+      })
+        .then((didRefresh) => {
+          if (didRefresh) setStatus(`mail sync updated: ${event.payload.reason}`);
+        })
+        .catch((error) => setStatus(`mail sync refresh failed: ${String(error)}`));
+    })
+      .then((dispose) => {
+        if (isCancelled) {
+          dispose();
+        } else {
+          unlisten = dispose;
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      isCancelled = true;
+      unlisten?.();
+    };
+  }, [refreshAudits, refreshFolders, refreshMessages, refreshPendingActions, refreshSyncState]);
 
   useEffect(() => {
     setSelectedMessage(null);

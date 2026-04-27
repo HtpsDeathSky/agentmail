@@ -34,6 +34,10 @@ pub enum ProtocolError {
 
 pub type ProtocolResult<T> = Result<T, ProtocolError>;
 
+pub fn validate_mailbox_address(value: &str) -> ProtocolResult<()> {
+    parse_mailbox(value).map(|_| ())
+}
+
 const IMAP_IDLE_TIMEOUT: Duration = Duration::from_secs(29 * 60);
 
 #[async_trait]
@@ -333,7 +337,26 @@ impl MailProtocol for LiveMailProtocol {
                     }
                 }
             }
-            MailActionKind::PermanentDelete | MailActionKind::Send | MailActionKind::Forward => {
+            MailActionKind::PermanentDelete => {
+                if !capabilities.has_str("UIDPLUS") {
+                    let _ = session.logout().await;
+                    return Err(ProtocolError::Unsupported(
+                        "IMAP server does not advertise UIDPLUS; precise permanent delete is unavailable".to_string(),
+                    ));
+                }
+                drain_uid_store(&mut session, &uid_set, "+FLAGS.SILENT (\\Deleted)").await?;
+                {
+                    let expunge_stream = session
+                        .uid_expunge(&uid_set)
+                        .await
+                        .map_err(|err| ProtocolError::Fetch(sanitize_error(&err.to_string())))?;
+                    let _: Vec<_> = expunge_stream
+                        .try_collect()
+                        .await
+                        .map_err(|err| ProtocolError::Fetch(sanitize_error(&err.to_string())))?;
+                }
+            }
+            MailActionKind::Send | MailActionKind::Forward => {
                 let _ = session.logout().await;
                 return Err(ProtocolError::Unsupported(format!(
                     "remote action {:?} is not supported by IMAP adapter",
@@ -996,6 +1019,12 @@ mod tests {
             "42,99"
         );
         assert!(uid_set_from_strings(&["not-a-uid".to_string()]).is_err());
+    }
+
+    #[test]
+    fn validates_mailbox_addresses_with_protocol_parser() {
+        assert!(validate_mailbox_address("ops@example.com").is_ok());
+        assert!(validate_mailbox_address("app test").is_err());
     }
 
     #[test]
