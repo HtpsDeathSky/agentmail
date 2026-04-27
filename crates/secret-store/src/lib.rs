@@ -59,11 +59,11 @@ mod windows_store {
     use super::{SecretError, SecretResult, SecretStore};
     use std::ffi::c_void;
     use std::ptr::null_mut;
-    use windows::core::{w, PCWSTR};
+    use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Foundation::FILETIME;
     use windows::Win32::Security::Credentials::{
-        CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
-        CRED_TYPE_GENERIC,
+        CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_FLAGS,
+        CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
     };
 
     #[derive(Clone, Default)]
@@ -78,20 +78,22 @@ mod windows_store {
     impl SecretStore for WindowsCredentialStore {
         fn set_secret(&self, target: &str, secret: &str) -> SecretResult<()> {
             let target_w = Self::to_wide(target);
+            let mut target_w = target_w;
+            let mut user_w = Self::to_wide("AgentMail");
             let secret_bytes = secret.as_bytes();
             let mut credential = CREDENTIALW {
-                Flags: 0,
+                Flags: CRED_FLAGS(0),
                 Type: CRED_TYPE_GENERIC,
-                TargetName: PCWSTR(target_w.as_ptr()),
-                Comment: PCWSTR::null(),
+                TargetName: PWSTR(target_w.as_mut_ptr()),
+                Comment: PWSTR::null(),
                 LastWritten: FILETIME::default(),
                 CredentialBlobSize: secret_bytes.len() as u32,
                 CredentialBlob: secret_bytes.as_ptr() as *mut u8,
                 Persist: CRED_PERSIST_LOCAL_MACHINE,
                 AttributeCount: 0,
                 Attributes: null_mut(),
-                TargetAlias: PCWSTR::null(),
-                UserName: w!("AgentMail"),
+                TargetAlias: PWSTR::null(),
+                UserName: PWSTR(user_w.as_mut_ptr()),
             };
 
             unsafe {
@@ -120,7 +122,7 @@ mod windows_store {
                 );
                 let value = String::from_utf8(blob.to_vec())
                     .map_err(|err| SecretError::Backend(err.to_string()));
-                CredFree(Some(credential_ptr as *const c_void));
+                CredFree(credential_ptr as *const c_void);
                 value
             }
         }
