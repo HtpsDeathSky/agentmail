@@ -1,5 +1,14 @@
 # Foxmail AI 增强桌面客户端开发计划
 
+> Historical planning note. This document records an early product plan and is not
+> the current project status source. For current state and handoff memory, read
+> `docs/PROJECT_STATUS.md`, `docs/DECISIONS.md`, and `docs/NEXT_STEPS.md`.
+>
+> Important deltas from this historical plan: the current MVP skips local AI
+> sensitivity auditing, stores the AI API key in SQLite plaintext by user
+> decision, uses manual user-triggered remote AI analysis only, and does not aim
+> to fully clone Foxmail in the first release.
+
 ## Summary
 
 - 全新项目，不复用当前 Web/Next.js 代码。

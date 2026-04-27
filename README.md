@@ -15,7 +15,23 @@ Windows-first desktop mail client MVP built with Tauri v2, Rust, React/Vite, SQL
 - Tauri startup triggers background sync for accounts with `sync_enabled=true`.
 - Desktop UI shell with account/folder rail, message list, detail pane, compose modal, search, sync controls, and bottom operations console.
 - AI analysis is manual only for the selected message. The remote provider must expose an HTTPS OpenAI-compatible API.
+- AI summaries are prompted to be concise Simplified Chinese.
 - AI API keys are stored plaintext in SQLite for this MVP. After save, the full key is not returned to the UI.
+- Windows app binaries are configured as GUI apps and should not open an extra terminal window.
+
+## Project Handoff Memory
+
+For a new model or engineer session, read these files in order:
+
+1. `README.md`
+2. [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
+3. [docs/DECISIONS.md](docs/DECISIONS.md)
+4. [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md)
+5. [docs/REAL_MAIL_ACCEPTANCE.md](docs/REAL_MAIL_ACCEPTANCE.md)
+
+`docs/superpowers/*` contains historical Superpowers plugin outputs. Keep it for traceability, but do not treat it as the current project memory source.
+
+Most project documents should live under `docs/`; the root should stay limited to `README.md` and project/tooling files.
 
 ## Commands
 

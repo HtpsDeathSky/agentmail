@@ -17,10 +17,17 @@ Use a disposable or dedicated test mailbox. Do not run destructive checks on a p
 4. Click `TEST` and confirm both IMAP and SMTP report OK.
 5. Save the account and let the initial sync finish.
 
+## Desktop Startup Acceptance
+
+- Launch the Windows app from the installed bundle.
+- Confirm the app opens without an extra black terminal window.
+- If starting through PowerShell/CMD for development, the launcher terminal may remain; the app itself should not spawn a separate terminal window.
+
 ## Sync Acceptance
 
 - The folder rail shows Inbox. Sent, Archive, Trash, Drafts, and provider-specific folders appear when returned as selectable IMAP folders.
 - Selecting each synced folder loads messages for that folder, not only Inbox.
+- Folder rows show synced local counts. Folders with unread mail may show `unread/total`; folders without unread mail should show the total count.
 - `SYNC & CONNECTIONS` shows the account as idle after sync.
 - Re-running sync does not duplicate messages.
 - A folder-level failure appears in sync status without preventing other folders from loading.
@@ -40,6 +47,7 @@ Use a disposable or dedicated test mailbox. Do not run destructive checks on a p
 - Configure AI provider settings with an HTTPS OpenAI-compatible endpoint.
 - Analyze one non-sensitive test message.
 - Confirm summary, category, priority, todos, and reply draft appear.
+- Confirm the summary is concise Simplified Chinese.
 - Reopen the same message and confirm saved insight history remains.
 - Clear or update AI settings.
 
