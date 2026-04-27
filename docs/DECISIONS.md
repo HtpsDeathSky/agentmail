@@ -20,7 +20,8 @@ Last updated: 2026-04-27
 - Frontend calls Tauri commands only; it must not read SQLite directly.
 - Store AI API keys plaintext in SQLite for this MVP.
 - Do not return the full AI API key to the UI after saving; return only a mask.
-- Mailbox passwords go through `secret-store`; Windows uses Windows Credential Manager.
+- Store mailbox IMAP/SMTP passwords plaintext in SQLite for this MVP.
+- Do not use Windows Credential Manager or secret-store fallback for mailbox passwords.
 - SMTP send must enter `PENDING ACTIONS` first and execute only after explicit confirmation.
 - Windows app should not show an extra terminal window in dev/debug/release app binaries.
 - GitHub Actions builds Windows release bundles from `main`.

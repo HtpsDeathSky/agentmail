@@ -1,4 +1,5 @@
 import type {
+  AccountConfigView,
   AddAccountRequest,
   AiInsight,
   AiPriority,
@@ -12,6 +13,7 @@ import type {
   MailMessage,
   MessageQuery,
   PendingMailAction,
+  SaveAccountConfigRequest,
   SaveAiSettingsRequest,
   SendMessageDraft,
   SyncState,
@@ -187,6 +189,9 @@ let audits: MailActionAudit[] = [
 ];
 
 let accounts = [account];
+let accountPasswords: Record<string, string> = {
+  [account.id]: "demo-mail-secret"
+};
 let pendingActions: PendingMailAction[] = [];
 let aiSettings: AiSettingsView | null = {
   provider_name: "openai-compatible",
@@ -260,6 +265,39 @@ export const demoBackend = {
           updated_at: now()
         };
         accounts = [next, ...accounts];
+        accountPasswords[next.id] = request.password;
+        recordAudit("mark_read", next.id, []);
+        return next;
+      }
+      case "get_account_config": {
+        const accountId = (args?.accountId ?? args?.account_id) as string;
+        const found = accounts.find((item) => item.id === accountId);
+        if (!found) throw new Error("account not found");
+        const config: AccountConfigView = {
+          ...found,
+          password: accountPasswords[found.id] ?? ""
+        };
+        return config;
+      }
+      case "save_account_config": {
+        const request = args?.request as SaveAccountConfigRequest;
+        const existing = request.id ? accounts.find((item) => item.id === request.id) : null;
+        const next: MailAccount = {
+          id: existing?.id ?? crypto.randomUUID(),
+          display_name: request.display_name,
+          email: request.email,
+          imap_host: request.imap_host,
+          imap_port: request.imap_port,
+          imap_tls: request.imap_tls,
+          smtp_host: request.smtp_host,
+          smtp_port: request.smtp_port,
+          smtp_tls: request.smtp_tls,
+          sync_enabled: request.sync_enabled,
+          created_at: existing?.created_at ?? now(),
+          updated_at: now()
+        };
+        accounts = [next, ...accounts.filter((item) => item.id !== next.id)];
+        accountPasswords[next.id] = request.password;
         recordAudit("mark_read", next.id, []);
         return next;
       }

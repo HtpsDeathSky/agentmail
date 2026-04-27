@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use app_api::{AddAccountRequest, AppApi, SyncSummary, TestConnectionRequest};
+use app_api::{
+    AccountConfigView, AddAccountRequest, AppApi, SaveAccountConfigRequest, SyncSummary,
+    TestConnectionRequest,
+};
 use mail_core::{
     AiInsight, AiSettingsView, ConnectionTestResult, MailAccount, MailActionAudit,
     MailActionRequest, MailActionResult, MailFolder, MailMessage, MessageQuery, PendingMailAction,
@@ -37,6 +40,26 @@ async fn test_account_connection(
 #[tauri::command]
 fn list_accounts(state: State<'_, ApiState>) -> Result<Vec<MailAccount>, String> {
     state.api.list_accounts().map_err(to_error)
+}
+
+#[tauri::command]
+fn get_account_config(
+    state: State<'_, ApiState>,
+    account_id: String,
+) -> Result<AccountConfigView, String> {
+    state.api.get_account_config(account_id).map_err(to_error)
+}
+
+#[tauri::command]
+async fn save_account_config(
+    state: State<'_, ApiState>,
+    request: SaveAccountConfigRequest,
+) -> Result<MailAccount, String> {
+    state
+        .api
+        .save_account_config(request)
+        .await
+        .map_err(to_error)
 }
 
 #[tauri::command]
@@ -203,6 +226,8 @@ fn main() {
             add_account,
             test_account_connection,
             list_accounts,
+            get_account_config,
+            save_account_config,
             sync_account,
             get_sync_status,
             list_folders,

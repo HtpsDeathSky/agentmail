@@ -14,7 +14,6 @@ use mail_core::{
 use mail_protocol::{LiveMailProtocol, MailProtocol, ProtocolError};
 use mail_store::{MailStore, MessageFlagPatch, StoreError};
 use parking_lot::Mutex;
-use secret_store::{mail_password_target, PlatformSecretStore, SecretError, SecretStore};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -22,8 +21,6 @@ use thiserror::Error;
 pub enum ApiError {
     #[error(transparent)]
     Store(#[from] StoreError),
-    #[error(transparent)]
-    Secret(#[from] SecretError),
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
     #[error(transparent)]
@@ -46,21 +43,15 @@ pub type ApiResult<T> = Result<T, ApiError>;
 #[derive(Clone)]
 pub struct AppApi {
     store: MailStore,
-    secrets: Arc<dyn SecretStore>,
     protocol: Arc<dyn MailProtocol>,
     ai_provider: Arc<dyn AiProvider>,
     sync_locks: Arc<Mutex<HashSet<String>>>,
 }
 
 impl AppApi {
-    pub fn new(
-        store: MailStore,
-        secrets: Arc<dyn SecretStore>,
-        protocol: Arc<dyn MailProtocol>,
-    ) -> Self {
+    pub fn new(store: MailStore, protocol: Arc<dyn MailProtocol>) -> Self {
         Self::new_with_ai_provider(
             store,
-            secrets,
             protocol,
             Arc::new(OpenAiCompatibleProvider::default()),
         )
@@ -68,13 +59,11 @@ impl AppApi {
 
     pub fn new_with_ai_provider(
         store: MailStore,
-        secrets: Arc<dyn SecretStore>,
         protocol: Arc<dyn MailProtocol>,
         ai_provider: Arc<dyn AiProvider>,
     ) -> Self {
         Self {
             store,
-            secrets,
             protocol,
             ai_provider,
             sync_locks: Arc::new(Mutex::new(HashSet::new())),
@@ -84,25 +73,63 @@ impl AppApi {
     pub fn new_default(db_path: impl AsRef<Path>) -> ApiResult<Self> {
         Ok(Self::new(
             MailStore::open(db_path)?,
-            Arc::new(PlatformSecretStore::default()),
             Arc::new(LiveMailProtocol),
         ))
     }
 
     pub async fn add_account(&self, request: AddAccountRequest) -> ApiResult<MailAccount> {
-        request.validate()?;
-
-        let settings = ConnectionSettings {
-            account_id: None,
-            email: request.email.clone(),
-            imap_host: request.imap_host.clone(),
+        self.save_account_config(SaveAccountConfigRequest {
+            id: None,
+            display_name: request.display_name,
+            email: request.email,
+            password: request.password,
+            imap_host: request.imap_host,
             imap_port: request.imap_port,
             imap_tls: request.imap_tls,
-            smtp_host: request.smtp_host.clone(),
+            smtp_host: request.smtp_host,
             smtp_port: request.smtp_port,
             smtp_tls: request.smtp_tls,
-            password: request.password.clone(),
+            sync_enabled: true,
+        })
+        .await
+    }
+
+    pub async fn test_account_connection(
+        &self,
+        request: TestConnectionRequest,
+    ) -> ApiResult<ConnectionTestResult> {
+        let settings = if let Some(account_id) = request.account_id {
+            let account = self.store.get_account(&account_id)?;
+            let password = self.store.get_account_password(&account.id)?;
+            account_to_settings(&account, password)
+        } else {
+            let manual = request
+                .manual
+                .ok_or_else(|| ApiError::InvalidRequest("manual settings required".to_string()))?;
+            manual.validate()?;
+            manual.connection_settings(None)
         };
+
+        Ok(self.protocol.test_connection(&settings).await?)
+    }
+
+    pub fn list_accounts(&self) -> ApiResult<Vec<MailAccount>> {
+        Ok(self.store.list_accounts()?)
+    }
+
+    pub fn get_account_config(&self, account_id: String) -> ApiResult<AccountConfigView> {
+        let account = self.store.get_account(&account_id)?;
+        let password = self.store.get_account_password(&account.id)?;
+        Ok(account_config_view(account, password))
+    }
+
+    pub async fn save_account_config(
+        &self,
+        request: SaveAccountConfigRequest,
+    ) -> ApiResult<MailAccount> {
+        request.validate()?;
+
+        let settings = request.connection_settings(request.id.clone());
         let connection_result = self.protocol.test_connection(&settings).await?;
         if !connection_result.imap_ok || !connection_result.smtp_ok {
             return Err(ApiError::InvalidRequest(format!(
@@ -112,8 +139,15 @@ impl AppApi {
         }
 
         let now = now_rfc3339();
+        let existing = match request.id.as_deref() {
+            Some(id) => Some(self.store.get_account(id)?),
+            None => None,
+        };
         let account = MailAccount {
-            id: new_id(),
+            id: existing
+                .as_ref()
+                .map(|account| account.id.clone())
+                .unwrap_or_else(new_id),
             display_name: request.display_name,
             email: request.email,
             imap_host: request.imap_host,
@@ -122,57 +156,26 @@ impl AppApi {
             smtp_host: request.smtp_host,
             smtp_port: request.smtp_port,
             smtp_tls: request.smtp_tls,
-            sync_enabled: true,
-            created_at: now.clone(),
+            sync_enabled: request.sync_enabled,
+            created_at: existing
+                .as_ref()
+                .map(|account| account.created_at.clone())
+                .unwrap_or_else(|| now.clone()),
             updated_at: now,
         };
 
-        self.secrets
-            .set_secret(&mail_password_target(&account.id), &request.password)?;
-        self.store.save_account(&account)?;
-        self.write_audit(
-            &account.id,
-            MailActionKind::MarkRead,
-            Vec::new(),
-            ActionAuditStatus::Executed,
-            None,
-        )?;
+        self.store
+            .save_account_with_password(&account, &request.password)?;
+        if existing.is_none() {
+            self.write_audit(
+                &account.id,
+                MailActionKind::MarkRead,
+                Vec::new(),
+                ActionAuditStatus::Executed,
+                None,
+            )?;
+        }
         Ok(account)
-    }
-
-    pub async fn test_account_connection(
-        &self,
-        request: TestConnectionRequest,
-    ) -> ApiResult<ConnectionTestResult> {
-        let settings = if let Some(account_id) = request.account_id {
-            let account = self.store.get_account(&account_id)?;
-            let password = self
-                .secrets
-                .get_secret(&mail_password_target(&account.id))?;
-            account_to_settings(&account, password)
-        } else {
-            let manual = request
-                .manual
-                .ok_or_else(|| ApiError::InvalidRequest("manual settings required".to_string()))?;
-            manual.validate()?;
-            ConnectionSettings {
-                account_id: None,
-                email: manual.email,
-                imap_host: manual.imap_host,
-                imap_port: manual.imap_port,
-                imap_tls: manual.imap_tls,
-                smtp_host: manual.smtp_host,
-                smtp_port: manual.smtp_port,
-                smtp_tls: manual.smtp_tls,
-                password: manual.password,
-            }
-        };
-
-        Ok(self.protocol.test_connection(&settings).await?)
-    }
-
-    pub fn list_accounts(&self) -> ApiResult<Vec<MailAccount>> {
-        Ok(self.store.list_accounts()?)
     }
 
     pub async fn sync_account(&self, account_id: String) -> ApiResult<SyncSummary> {
@@ -905,9 +908,12 @@ impl AppApi {
         &self,
         account: &MailAccount,
     ) -> ApiResult<ConnectionSettings> {
-        let password = self
-            .secrets
-            .get_secret(&mail_password_target(&account.id))?;
+        let password = self.store.get_account_password(&account.id)?;
+        if password.is_empty() {
+            return Err(ApiError::InvalidRequest(
+                "account password is required; save it in configuration".to_string(),
+            ));
+        }
         Ok(account_to_settings(account, password))
     }
 
@@ -948,7 +954,41 @@ pub struct AddAccountRequest {
     pub smtp_tls: bool,
 }
 
-impl AddAccountRequest {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountConfigView {
+    pub id: String,
+    pub display_name: String,
+    pub email: String,
+    pub password: String,
+    pub imap_host: String,
+    pub imap_port: u16,
+    pub imap_tls: bool,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_tls: bool,
+    pub sync_enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveAccountConfigRequest {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub display_name: String,
+    pub email: String,
+    pub password: String,
+    pub imap_host: String,
+    pub imap_port: u16,
+    pub imap_tls: bool,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_tls: bool,
+    #[serde(default = "default_sync_enabled")]
+    pub sync_enabled: bool,
+}
+
+impl SaveAccountConfigRequest {
     fn validate(&self) -> ApiResult<()> {
         if self.email.trim().is_empty() {
             return Err(ApiError::InvalidRequest("email is required".to_string()));
@@ -963,12 +1003,30 @@ impl AddAccountRequest {
         }
         Ok(())
     }
+
+    fn connection_settings(&self, account_id: Option<String>) -> ConnectionSettings {
+        ConnectionSettings {
+            account_id,
+            email: self.email.clone(),
+            imap_host: self.imap_host.clone(),
+            imap_port: self.imap_port,
+            imap_tls: self.imap_tls,
+            smtp_host: self.smtp_host.clone(),
+            smtp_port: self.smtp_port,
+            smtp_tls: self.smtp_tls,
+            password: self.password.clone(),
+        }
+    }
+}
+
+fn default_sync_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestConnectionRequest {
     pub account_id: Option<String>,
-    pub manual: Option<AddAccountRequest>,
+    pub manual: Option<SaveAccountConfigRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -991,6 +1049,24 @@ fn account_to_settings(account: &MailAccount, password: String) -> ConnectionSet
         smtp_port: account.smtp_port,
         smtp_tls: account.smtp_tls,
         password,
+    }
+}
+
+fn account_config_view(account: MailAccount, password: String) -> AccountConfigView {
+    AccountConfigView {
+        id: account.id,
+        display_name: account.display_name,
+        email: account.email,
+        password,
+        imap_host: account.imap_host,
+        imap_port: account.imap_port,
+        imap_tls: account.imap_tls,
+        smtp_host: account.smtp_host,
+        smtp_port: account.smtp_port,
+        smtp_tls: account.smtp_tls,
+        sync_enabled: account.sync_enabled,
+        created_at: account.created_at,
+        updated_at: account.updated_at,
     }
 }
 
@@ -1059,15 +1135,10 @@ mod tests {
     use mail_protocol::MockMailProtocol;
     use mail_protocol::ProtocolResult;
     use mail_store::MailStore;
-    use secret_store::MemorySecretStore;
 
     #[test]
     fn ai_settings_are_saved_and_masked() {
-        let api = AppApi::new(
-            MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
-            Arc::new(MockMailProtocol),
-        );
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(MockMailProtocol));
 
         let saved = api
             .save_ai_settings(SaveAiSettingsRequest {
@@ -1088,11 +1159,7 @@ mod tests {
 
     #[test]
     fn short_ai_settings_key_is_not_reconstructable_from_mask() {
-        let api = AppApi::new(
-            MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
-            Arc::new(MockMailProtocol),
-        );
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(MockMailProtocol));
 
         let saved = api
             .save_ai_settings(SaveAiSettingsRequest {
@@ -1109,11 +1176,7 @@ mod tests {
 
     #[test]
     fn unicode_ai_settings_key_is_saved_and_masked() {
-        let api = AppApi::new(
-            MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
-            Arc::new(MockMailProtocol),
-        );
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(MockMailProtocol));
 
         let saved = api
             .save_ai_settings(SaveAiSettingsRequest {
@@ -1133,11 +1196,7 @@ mod tests {
 
     #[test]
     fn save_ai_settings_rejects_cleartext_remote_base_url() {
-        let api = AppApi::new(
-            MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
-            Arc::new(MockMailProtocol),
-        );
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(MockMailProtocol));
 
         let result = api.save_ai_settings(SaveAiSettingsRequest {
             provider_name: "openai-compatible".to_string(),
@@ -1159,7 +1218,6 @@ mod tests {
     async fn run_ai_analysis_requires_settings() {
         let api = AppApi::new_with_ai_provider(
             MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
             Arc::new(MockMailProtocol),
             Arc::new(MockAiProvider::new(ai_payload())),
         );
@@ -1179,7 +1237,6 @@ mod tests {
     async fn disabled_ai_settings_do_not_call_provider_or_store_insight() {
         let api = AppApi::new_with_ai_provider(
             MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
             Arc::new(MockMailProtocol),
             Arc::new(MockAiProvider::new(ai_payload())),
         );
@@ -1206,7 +1263,6 @@ mod tests {
     async fn run_ai_analysis_stores_provider_result() {
         let api = AppApi::new_with_ai_provider(
             MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
             Arc::new(MockMailProtocol),
             Arc::new(MockAiProvider::new(ai_payload())),
         );
@@ -1230,7 +1286,6 @@ mod tests {
         let captured = Arc::clone(&provider.inputs);
         let api = AppApi::new_with_ai_provider(
             MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
             Arc::new(MockMailProtocol),
             Arc::new(provider),
         );
@@ -1252,7 +1307,6 @@ mod tests {
     async fn provider_failure_does_not_store_insight() {
         let api = AppApi::new_with_ai_provider(
             MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
             Arc::new(MockMailProtocol),
             Arc::new(MockAiProvider::error(AiRemoteError::Request(
                 "forced failure".to_string(),
@@ -1269,11 +1323,7 @@ mod tests {
 
     #[tokio::test]
     async fn account_sync_populates_folders_and_messages() {
-        let api = AppApi::new(
-            MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
-            Arc::new(MockMailProtocol),
-        );
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(MockMailProtocol));
         let account = api
             .add_account(AddAccountRequest {
                 display_name: "Ops".to_string(),
@@ -1327,11 +1377,7 @@ mod tests {
 
     #[test]
     fn sync_lock_blocks_duplicate_account_sync() {
-        let api = AppApi::new(
-            MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
-            Arc::new(MockMailProtocol),
-        );
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(MockMailProtocol));
 
         let guard = api.acquire_sync_lock("acct").unwrap();
         match api.acquire_sync_lock("acct") {
@@ -1343,12 +1389,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn account_config_round_trips_plaintext_sqlite_password() {
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(MockMailProtocol));
+
+        let account = api
+            .save_account_config(SaveAccountConfigRequest {
+                id: None,
+                display_name: "Ops".to_string(),
+                email: "ops@example.com".to_string(),
+                password: "sqlite-secret".to_string(),
+                imap_host: "imap.example.com".to_string(),
+                imap_port: 993,
+                imap_tls: true,
+                smtp_host: "smtp.example.com".to_string(),
+                smtp_port: 465,
+                smtp_tls: true,
+                sync_enabled: true,
+            })
+            .await
+            .unwrap();
+
+        let saved = api.get_account_config(account.id.clone()).unwrap();
+        assert_eq!(saved.password, "sqlite-secret");
+
+        api.save_account_config(SaveAccountConfigRequest {
+            id: Some(account.id.clone()),
+            display_name: "Ops Mail".to_string(),
+            email: "ops@example.com".to_string(),
+            password: "updated-secret".to_string(),
+            imap_host: "imap.mail.example.com".to_string(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.mail.example.com".to_string(),
+            smtp_port: 587,
+            smtp_tls: true,
+            sync_enabled: true,
+        })
+        .await
+        .unwrap();
+
+        let updated = api.get_account_config(account.id).unwrap();
+        assert_eq!(updated.display_name, "Ops Mail");
+        assert_eq!(updated.smtp_port, 587);
+        assert_eq!(updated.password, "updated-secret");
+    }
+
+    #[tokio::test]
     async fn sync_failure_enters_backoff_and_blocks_next_attempt() {
-        let api = AppApi::new(
-            MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
-            Arc::new(FailingFetchProtocol),
-        );
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(FailingFetchProtocol));
         let account = api
             .add_account(AddAccountRequest {
                 display_name: "Ops".to_string(),
@@ -1384,7 +1472,6 @@ mod tests {
     async fn folder_fetch_failure_does_not_block_other_folders() {
         let api = AppApi::new(
             MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
             Arc::new(PartialFailingFetchProtocol),
         );
         let account = add_sample_account(&api).await;
@@ -1421,7 +1508,6 @@ mod tests {
     async fn sync_recomputes_folder_counts_from_stored_messages() {
         let api = AppApi::new(
             MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
             Arc::new(PartialFailingFetchProtocol),
         );
         let account = add_sample_account(&api).await;
@@ -1441,11 +1527,7 @@ mod tests {
     async fn low_risk_action_calls_protocol_then_updates_local_state() {
         let protocol = RecordingProtocol::default();
         let actions = Arc::clone(&protocol.actions);
-        let api = AppApi::new(
-            MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
-            Arc::new(protocol),
-        );
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
         let account = add_sample_account(&api).await;
         api.sync_account(account.id.clone()).await.unwrap();
         let message = first_message(&api, &account.id);
@@ -1471,7 +1553,6 @@ mod tests {
     async fn confirmed_action_refreshes_folder_counts() {
         let api = AppApi::new(
             MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
             Arc::new(RecordingProtocol::default()),
         );
         let account = add_sample_account(&api).await;
@@ -1499,11 +1580,7 @@ mod tests {
             fail_actions: true,
             ..RecordingProtocol::default()
         };
-        let api = AppApi::new(
-            MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
-            Arc::new(protocol),
-        );
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
         let account = add_sample_account(&api).await;
         api.sync_account(account.id.clone()).await.unwrap();
         let message = first_message(&api, &account.id);
@@ -1529,11 +1606,7 @@ mod tests {
     async fn delete_moves_to_trash_and_clears_local_uid() {
         let protocol = RecordingProtocol::default();
         let actions = Arc::clone(&protocol.actions);
-        let api = AppApi::new(
-            MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
-            Arc::new(protocol),
-        );
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
         let account = add_sample_account(&api).await;
         api.sync_account(account.id.clone()).await.unwrap();
         let message = first_message(&api, &account.id);
@@ -1565,11 +1638,7 @@ mod tests {
     async fn send_message_queues_until_confirmed() {
         let protocol = RecordingProtocol::default();
         let sends = Arc::clone(&protocol.sends);
-        let api = AppApi::new(
-            MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
-            Arc::new(protocol),
-        );
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
         let account = add_sample_account(&api).await;
 
         let pending_id = api
@@ -1601,11 +1670,7 @@ mod tests {
     async fn reject_pending_action_does_not_execute_protocol() {
         let protocol = RecordingProtocol::default();
         let sends = Arc::clone(&protocol.sends);
-        let api = AppApi::new(
-            MailStore::memory().unwrap(),
-            Arc::new(MemorySecretStore::default()),
-            Arc::new(protocol),
-        );
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
         let account = add_sample_account(&api).await;
 
         let pending_id = api

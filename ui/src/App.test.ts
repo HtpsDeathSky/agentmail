@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatFolderCount, formatSendQueuedStatus } from "./App";
+import { formatAuditLine, formatFolderCount, formatSendQueuedStatus } from "./App";
 
 describe("formatFolderCount", () => {
   it("shows total count when no messages are unread", () => {
@@ -16,5 +16,21 @@ describe("formatSendQueuedStatus", () => {
     expect(formatSendQueuedStatus(["ops@example.com"])).toBe(
       "send queued for ops@example.com / confirm SEND in PENDING ACTIONS"
     );
+  });
+});
+
+describe("formatAuditLine", () => {
+  it("keeps failed action error details visible in activity log text", () => {
+    expect(
+      formatAuditLine({
+        id: "audit-1",
+        account_id: "acct",
+        action: "send",
+        message_ids: [],
+        status: "failed",
+        error_message: "SMTP authentication rejected by provider",
+        created_at: "2026-04-27T07:30:00Z"
+      })
+    ).toContain("SMTP authentication rejected by provider");
   });
 });

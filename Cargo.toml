@@ -2,7 +2,6 @@
 members = [
   "crates/mail-core",
   "crates/mail-store",
-  "crates/secret-store",
   "crates/mail-protocol",
   "crates/ai-remote",
   "crates/app-api",

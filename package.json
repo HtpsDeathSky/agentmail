@@ -9,8 +9,8 @@
     "build": "tsc -p ui/tsconfig.json && vite build --config ui/vite.config.ts",
     "preview": "vite preview --config ui/vite.config.ts",
     "test": "vitest run --config ui/vite.config.ts",
-    "rust:check": "cargo check -p mail-core -p mail-store -p secret-store -p mail-protocol -p ai-remote -p app-api",
-    "rust:test": "cargo test -p mail-core -p mail-store -p secret-store -p mail-protocol -p ai-remote -p app-api",
+    "rust:check": "cargo check -p mail-core -p mail-store -p mail-protocol -p ai-remote -p app-api",
+    "rust:test": "cargo test -p mail-core -p mail-store -p mail-protocol -p ai-remote -p app-api",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
   },

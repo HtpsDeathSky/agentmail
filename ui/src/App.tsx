@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import {
-  AddAccountRequest,
+  AccountConfigView,
   AiInsight,
   AiSettingsView,
   api,
@@ -32,12 +32,14 @@ import {
   MailFolder,
   MailMessage,
   PendingMailAction,
+  SaveAccountConfigRequest,
   SaveAiSettingsRequest,
   SendMessageDraft,
   SyncState
 } from "./api";
 
-const defaultAccountForm: AddAccountRequest = {
+const defaultAccountConfigForm: SaveAccountConfigRequest = {
+  id: null,
   display_name: "",
   email: "",
   password: "",
@@ -46,7 +48,8 @@ const defaultAccountForm: AddAccountRequest = {
   imap_tls: true,
   smtp_host: "",
   smtp_port: 465,
-  smtp_tls: true
+  smtp_tls: true,
+  sync_enabled: true
 };
 
 const roleIcon = {
@@ -83,6 +86,11 @@ export function formatSendQueuedStatus(recipients: string[]) {
   return `send queued for ${recipients.join(", ")} / confirm SEND in PENDING ACTIONS`;
 }
 
+export function formatAuditLine(audit: MailActionAudit) {
+  const base = `[${formatTime(audit.created_at)}] ${actionLabels[audit.action] ?? audit.action}:${audit.status}`;
+  return audit.error_message ? `${base} / ${audit.error_message}` : base;
+}
+
 export function App() {
   const [accounts, setAccounts] = useState<MailAccount[]>([]);
   const [folders, setFolders] = useState<MailFolder[]>([]);
@@ -96,14 +104,13 @@ export function App() {
   const [pendingActions, setPendingActions] = useState<PendingMailAction[]>([]);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("backend link idle");
-  const [isAccountModalOpen, setAccountModalOpen] = useState(false);
+  const [isConfigOpen, setConfigOpen] = useState(false);
   const [isComposerOpen, setComposerOpen] = useState(false);
   const [aiSettings, setAiSettings] = useState<AiSettingsView | null>(null);
   const [aiInsights, setAiInsights] = useState<AiInsight[]>([]);
   const [isAnalyzing, setAnalyzing] = useState(false);
   const [isActionRunning, setActionRunning] = useState(false);
   const [aiStatus, setAiStatus] = useState("ai link idle");
-  const [isAiSettingsOpen, setAiSettingsOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
   const messagesRef = useRef<MailMessage[]>([]);
   const selectedMessageIdRef = useRef<string | null>(null);
@@ -292,24 +299,18 @@ export function App() {
     ]
   );
 
-  const handleAccountCreated = useCallback(
+  const handleAccountConfigSaved = useCallback(
     async (account: MailAccount) => {
       setAccounts((current) => [account, ...current.filter((item) => item.id !== account.id)]);
       setSelectedAccountId(account.id);
-      setAccountModalOpen(false);
-      try {
-        await api.syncAccount(account.id);
-      } catch (error) {
-        setStatus(`initial sync failed: ${String(error)}`);
-      }
       await refreshFolders(account.id);
-      await refreshMessages(account.id, null, "");
+      await refreshMessages(account.id, null, query);
       await refreshSyncState(account.id);
       await refreshAudits();
       await refreshPendingActions(account.id);
-      setStatus(`account added and synced: ${account.email}`);
+      setStatus(`account configuration saved: ${account.email}`);
     },
-    [refreshAudits, refreshFolders, refreshMessages, refreshPendingActions, refreshSyncState]
+    [query, refreshAudits, refreshFolders, refreshMessages, refreshPendingActions, refreshSyncState]
   );
 
   const handleSent = useCallback(
@@ -406,7 +407,7 @@ export function App() {
           <button className="icon-button" type="button" onClick={() => setComposerOpen(true)} disabled={!selectedAccountId} title="Compose">
             <MailPlus size={17} />
           </button>
-          <button className="icon-button" type="button" onClick={() => setAccountModalOpen(true)} title="Add account">
+          <button className="icon-button" type="button" onClick={() => setConfigOpen(true)} title="Configuration">
             <Settings size={17} />
           </button>
         </div>
@@ -546,7 +547,6 @@ export function App() {
                 isAnalyzing={isAnalyzing}
                 isActionRunning={isActionRunning}
                 onAnalyze={handleAnalyze}
-                onOpenSettings={() => setAiSettingsOpen(true)}
               />
             </>
           ) : (
@@ -590,18 +590,22 @@ export function App() {
         <section className="console-panel audit-feed">
           <header>AUDIT / ACTIVITY LOG</header>
           <p>{accountSyncState?.error_message ?? status}</p>
-          {audits.slice(0, 4).map((audit) => (
-            <code key={audit.id}>
-              [{formatTime(audit.created_at)}] {actionLabels[audit.action] ?? audit.action}:{audit.status}
-            </code>
+          {audits.slice(0, 8).map((audit) => (
+            <code key={audit.id}>{formatAuditLine(audit)}</code>
           ))}
         </section>
       </footer>
 
-      {isAccountModalOpen ? <AccountModal onClose={() => setAccountModalOpen(false)} onCreated={handleAccountCreated} /> : null}
       {isComposerOpen && selectedAccount ? <Composer account={selectedAccount} onClose={() => setComposerOpen(false)} onSent={handleSent} /> : null}
-      {isAiSettingsOpen ? (
-        <AiSettingsModal settings={aiSettings} onClose={() => setAiSettingsOpen(false)} onSaved={refreshAiSettings} />
+      {isConfigOpen ? (
+        <ConfigurationModal
+          accounts={accounts}
+          selectedAccountId={selectedAccountId}
+          settings={aiSettings}
+          onClose={() => setConfigOpen(false)}
+          onAccountSaved={handleAccountConfigSaved}
+          onAiSettingsSaved={refreshAiSettings}
+        />
       ) : null}
     </main>
   );
@@ -614,10 +618,9 @@ interface AiPanelProps {
   isAnalyzing: boolean;
   isActionRunning: boolean;
   onAnalyze: () => Promise<void>;
-  onOpenSettings: () => void;
 }
 
-function AiPanel({ settings, insights, status, isAnalyzing, isActionRunning, onAnalyze, onOpenSettings }: AiPanelProps) {
+function AiPanel({ settings, insights, status, isAnalyzing, isActionRunning, onAnalyze }: AiPanelProps) {
   const latest = insights[0] ?? null;
   const keyStatus = settings?.api_key_mask ? settings.api_key_mask : "not set";
 
@@ -628,9 +631,6 @@ function AiPanel({ settings, insights, status, isAnalyzing, isActionRunning, onA
           <PanelRight size={15} />
           <span>AI</span>
         </div>
-        <button type="button" onClick={onOpenSettings} title="AI settings">
-          <Settings size={14} />
-        </button>
       </header>
       <div className="ai-status-grid">
         <span>PROVIDER</span>
@@ -681,96 +681,291 @@ function AiPanel({ settings, insights, status, isAnalyzing, isActionRunning, onA
   );
 }
 
-interface AiSettingsModalProps {
+interface ConfigurationModalProps {
+  accounts: MailAccount[];
+  selectedAccountId: string | null;
   settings: AiSettingsView | null;
   onClose: () => void;
-  onSaved: () => Promise<void>;
+  onAccountSaved: (account: MailAccount) => Promise<void>;
+  onAiSettingsSaved: () => Promise<void>;
 }
 
-function AiSettingsModal({ settings, onClose, onSaved }: AiSettingsModalProps) {
-  const [form, setForm] = useState<SaveAiSettingsRequest>({
+type ConfigTab = "accounts" | "ai";
+
+function accountConfigToForm(config: AccountConfigView): SaveAccountConfigRequest {
+  return {
+    id: config.id,
+    display_name: config.display_name,
+    email: config.email,
+    password: config.password,
+    imap_host: config.imap_host,
+    imap_port: config.imap_port,
+    imap_tls: config.imap_tls,
+    smtp_host: config.smtp_host,
+    smtp_port: config.smtp_port,
+    smtp_tls: config.smtp_tls,
+    sync_enabled: config.sync_enabled
+  };
+}
+
+function ConfigurationModal({ accounts, selectedAccountId, settings, onClose, onAccountSaved, onAiSettingsSaved }: ConfigurationModalProps) {
+  const [activeTab, setActiveTab] = useState<ConfigTab>("accounts");
+  const [selectedId, setSelectedId] = useState<string | null>(selectedAccountId ?? accounts[0]?.id ?? null);
+  const [accountForm, setAccountForm] = useState<SaveAccountConfigRequest>({ ...defaultAccountConfigForm });
+  const [accountStatus, setAccountStatus] = useState("select account or add new");
+  const [isAccountBusy, setAccountBusy] = useState(false);
+  const [aiForm, setAiForm] = useState<SaveAiSettingsRequest>({
     provider_name: settings?.provider_name ?? "openai-compatible",
     base_url: settings?.base_url ?? "https://api.openai.com/v1",
     model: settings?.model ?? "",
     api_key: "",
     enabled: settings?.enabled ?? false
   });
-  const [status, setStatus] = useState(settings?.api_key_mask ? `key saved: ${settings.api_key_mask}` : "key not set");
-  const [isSaving, setSaving] = useState(false);
+  const [aiStatus, setAiStatus] = useState(settings?.api_key_mask ? `key saved: ${settings.api_key_mask}` : "key not set");
+  const [isAiBusy, setAiBusy] = useState(false);
 
-  const update = (field: keyof SaveAiSettingsRequest, value: string | boolean) => {
-    setForm((current) => ({ ...current, [field]: value }));
+  useEffect(() => {
+    if (selectedId && !accounts.some((account) => account.id === selectedId)) {
+      setSelectedId(accounts[0]?.id ?? null);
+    }
+  }, [accounts, selectedId]);
+
+  useEffect(() => {
+    if (!selectedId) {
+      setAccountForm({ ...defaultAccountConfigForm });
+      setAccountStatus("new account");
+      return;
+    }
+
+    let isCancelled = false;
+    setAccountStatus("loading account config");
+    void api
+      .getAccountConfig(selectedId)
+      .then((config) => {
+        if (isCancelled) return;
+        setAccountForm(accountConfigToForm(config));
+        setAccountStatus(`loaded ${config.email}`);
+      })
+      .catch((error) => {
+        if (!isCancelled) setAccountStatus(`load failed: ${String(error)}`);
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [selectedId]);
+
+  const updateAccount = (field: keyof SaveAccountConfigRequest, value: string | number | boolean | null) => {
+    setAccountForm((current) => ({ ...current, [field]: value }));
   };
 
-  const submit = async (event: FormEvent) => {
+  const updateAi = (field: keyof SaveAiSettingsRequest, value: string | boolean) => {
+    setAiForm((current) => ({ ...current, [field]: value }));
+  };
+
+  const startNewAccount = () => {
+    setSelectedId(null);
+    setAccountForm({ ...defaultAccountConfigForm });
+    setAccountStatus("new account");
+  };
+
+  const testAccount = async () => {
+    setAccountBusy(true);
+    setAccountStatus("testing account connection");
+    try {
+      const result = await api.testAccountConnection(accountForm);
+      setAccountStatus(`${result.imap_ok ? "IMAP OK" : "IMAP FAIL"} / ${result.smtp_ok ? "SMTP OK" : "SMTP FAIL"} / ${result.message}`);
+    } catch (error) {
+      setAccountStatus(`test failed: ${String(error)}`);
+    } finally {
+      setAccountBusy(false);
+    }
+  };
+
+  const submitAccount = async (event: FormEvent) => {
     event.preventDefault();
-    setSaving(true);
-    setStatus("saving ai settings");
+    setAccountBusy(true);
+    setAccountStatus("saving account config");
+    try {
+      const account = await api.saveAccountConfig(accountForm);
+      setSelectedId(account.id);
+      await onAccountSaved(account);
+      setAccountStatus(`saved ${account.email}`);
+    } catch (error) {
+      setAccountStatus(`save failed: ${String(error)}`);
+    } finally {
+      setAccountBusy(false);
+    }
+  };
+
+  const submitAi = async (event: FormEvent) => {
+    event.preventDefault();
+    setAiBusy(true);
+    setAiStatus("saving ai settings");
     try {
       await api.saveAiSettings({
-        ...form,
-        api_key: form.api_key?.trim() ? form.api_key : null
+        ...aiForm,
+        api_key: aiForm.api_key?.trim() ? aiForm.api_key : null
       });
-      await onSaved();
-      onClose();
+      await onAiSettingsSaved();
+      setAiStatus("ai settings saved");
     } catch (error) {
-      setStatus(`save failed: ${String(error)}`);
+      setAiStatus(`save failed: ${String(error)}`);
     } finally {
-      setSaving(false);
+      setAiBusy(false);
+    }
+  };
+
+  const clearAi = async () => {
+    setAiBusy(true);
+    setAiStatus("clearing ai settings");
+    try {
+      await api.clearAiSettings();
+      await onAiSettingsSaved();
+      setAiForm({
+        provider_name: "openai-compatible",
+        base_url: "https://api.openai.com/v1",
+        model: "",
+        api_key: "",
+        enabled: false
+      });
+      setAiStatus("key not set");
+    } catch (error) {
+      setAiStatus(`clear failed: ${String(error)}`);
+    } finally {
+      setAiBusy(false);
     }
   };
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <form className="modal-panel ai-settings-form" onSubmit={submit}>
+      <section className="modal-panel configuration-panel" role="dialog" aria-modal="true" aria-label="Configuration">
         <header>
-          <h2>AI SETTINGS</h2>
+          <h2>CONFIGURATION</h2>
           <button className="icon-button" type="button" onClick={onClose} title="Close">
             <X size={16} />
           </button>
         </header>
-        <label>
-          Provider
-          <input value={form.provider_name} onChange={(event) => update("provider_name", event.target.value)} required />
-        </label>
-        <label>
-          Base URL
-          <input value={form.base_url} onChange={(event) => update("base_url", event.target.value)} required />
-        </label>
-        <label>
-          Model
-          <input value={form.model} onChange={(event) => update("model", event.target.value)} required />
-        </label>
-        <label>
-          API Key
-          <input
-            type="password"
-            value={form.api_key ?? ""}
-            onChange={(event) => update("api_key", event.target.value)}
-            placeholder={settings?.api_key_mask ?? "sk-..."}
-          />
-        </label>
-        <label className="checkbox-row">
-          <input type="checkbox" checked={form.enabled} onChange={(event) => update("enabled", event.target.checked)} />
-          Enabled
-        </label>
-        <div className="modal-status">{status}</div>
-        <footer>
-          <button type="button" onClick={onClose}>
-            CANCEL
+        <div className="config-tabs" role="tablist" aria-label="Configuration sections">
+          <button className={activeTab === "accounts" ? "active" : ""} type="button" onClick={() => setActiveTab("accounts")}>
+            MAIL ACCOUNTS
           </button>
-          <button type="submit" disabled={isSaving}>
-            {isSaving ? "SAVING" : "SAVE"}
+          <button className={activeTab === "ai" ? "active" : ""} type="button" onClick={() => setActiveTab("ai")}>
+            AI MODEL
           </button>
-        </footer>
-      </form>
+        </div>
+
+        {activeTab === "accounts" ? (
+          <form className="config-body" onSubmit={submitAccount}>
+            <aside className="config-account-list">
+              <button type="button" onClick={startNewAccount}>
+                ADD ACCOUNT
+              </button>
+              {accounts.map((account) => (
+                <button
+                  className={account.id === selectedId ? "active" : ""}
+                  key={account.id}
+                  type="button"
+                  onClick={() => setSelectedId(account.id)}
+                >
+                  <span>{account.display_name || account.email}</span>
+                  <small>{account.email}</small>
+                </button>
+              ))}
+            </aside>
+            <section className="config-form-grid">
+              <label>
+                Display
+                <input value={accountForm.display_name} onChange={(event) => updateAccount("display_name", event.target.value)} required />
+              </label>
+              <label>
+                Email
+                <input type="email" value={accountForm.email} onChange={(event) => updateAccount("email", event.target.value)} required />
+              </label>
+              <label>
+                Password
+                <input type="password" value={accountForm.password} onChange={(event) => updateAccount("password", event.target.value)} required />
+              </label>
+              <label>
+                IMAP Host
+                <input value={accountForm.imap_host} onChange={(event) => updateAccount("imap_host", event.target.value)} required />
+              </label>
+              <label>
+                IMAP Port
+                <input type="number" value={accountForm.imap_port} onChange={(event) => updateAccount("imap_port", Number(event.target.value))} required />
+              </label>
+              <label>
+                SMTP Host
+                <input value={accountForm.smtp_host} onChange={(event) => updateAccount("smtp_host", event.target.value)} required />
+              </label>
+              <label>
+                SMTP Port
+                <input type="number" value={accountForm.smtp_port} onChange={(event) => updateAccount("smtp_port", Number(event.target.value))} required />
+              </label>
+              <label className="checkbox-row">
+                <input type="checkbox" checked={accountForm.imap_tls} onChange={(event) => updateAccount("imap_tls", event.target.checked)} />
+                IMAP TLS
+              </label>
+              <label className="checkbox-row">
+                <input type="checkbox" checked={accountForm.smtp_tls} onChange={(event) => updateAccount("smtp_tls", event.target.checked)} />
+                SMTP TLS
+              </label>
+              <label className="checkbox-row">
+                <input type="checkbox" checked={accountForm.sync_enabled} onChange={(event) => updateAccount("sync_enabled", event.target.checked)} />
+                Sync
+              </label>
+              <div className="modal-status">{accountStatus}</div>
+              <footer>
+                <button type="button" onClick={testAccount} disabled={isAccountBusy}>
+                  TEST
+                </button>
+                <button type="submit" disabled={isAccountBusy}>
+                  {isAccountBusy ? "SAVING" : "SAVE"}
+                </button>
+              </footer>
+            </section>
+          </form>
+        ) : (
+          <form className="config-ai-form" onSubmit={submitAi}>
+            <label>
+              Provider
+              <input value={aiForm.provider_name} onChange={(event) => updateAi("provider_name", event.target.value)} required />
+            </label>
+            <label>
+              Base URL
+              <input value={aiForm.base_url} onChange={(event) => updateAi("base_url", event.target.value)} required />
+            </label>
+            <label>
+              Model
+              <input value={aiForm.model} onChange={(event) => updateAi("model", event.target.value)} required />
+            </label>
+            <label>
+              API Key
+              <input
+                type="password"
+                value={aiForm.api_key ?? ""}
+                onChange={(event) => updateAi("api_key", event.target.value)}
+                placeholder={settings?.api_key_mask ?? "sk-..."}
+              />
+            </label>
+            <label className="checkbox-row">
+              <input type="checkbox" checked={aiForm.enabled} onChange={(event) => updateAi("enabled", event.target.checked)} />
+              Enabled
+            </label>
+            <div className="modal-status">{aiStatus}</div>
+            <footer>
+              <button type="button" onClick={clearAi} disabled={isAiBusy}>
+                CLEAR
+              </button>
+              <button type="submit" disabled={isAiBusy}>
+                {isAiBusy ? "SAVING" : "SAVE"}
+              </button>
+            </footer>
+          </form>
+        )}
+      </section>
     </div>
   );
-}
-
-interface AccountModalProps {
-  onClose: () => void;
-  onCreated: (account: MailAccount) => Promise<void>;
 }
 
 interface PendingActionQueueProps {
@@ -800,90 +995,6 @@ function PendingActionQueue({ actions, isActionRunning, onConfirm, onReject }: P
         </div>
       ))}
     </section>
-  );
-}
-
-function AccountModal({ onClose, onCreated }: AccountModalProps) {
-  const [form, setForm] = useState<AddAccountRequest>(defaultAccountForm);
-  const [testResult, setTestResult] = useState<string>("not tested");
-  const [isSaving, setSaving] = useState(false);
-
-  const update = (field: keyof AddAccountRequest, value: string | number | boolean) => {
-    setForm((current) => ({ ...current, [field]: value }));
-  };
-
-  const testConnection = async () => {
-    try {
-      const result = await api.testAccountConnection(form);
-      setTestResult(`${result.imap_ok ? "IMAP OK" : "IMAP FAIL"} / ${result.smtp_ok ? "SMTP OK" : "SMTP FAIL"} / ${result.message}`);
-    } catch (error) {
-      setTestResult(`TEST FAILED / ${String(error)}`);
-    }
-  };
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    setSaving(true);
-    try {
-      const account = await api.addAccount(form);
-      await onCreated(account);
-    } catch (error) {
-      setTestResult(`SAVE FAILED / ${String(error)}`);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <form className="modal-panel" onSubmit={submit}>
-        <header>
-          <h2>ACCOUNT LINK</h2>
-          <button className="icon-button" type="button" onClick={onClose} title="Close">
-            <X size={16} />
-          </button>
-        </header>
-        <div className="form-grid">
-          <label>
-            Display
-            <input value={form.display_name} onChange={(event) => update("display_name", event.target.value)} required />
-          </label>
-          <label>
-            Email
-            <input type="email" value={form.email} onChange={(event) => update("email", event.target.value)} required />
-          </label>
-          <label>
-            Password
-            <input type="password" value={form.password} onChange={(event) => update("password", event.target.value)} required />
-          </label>
-          <label>
-            IMAP Host
-            <input value={form.imap_host} onChange={(event) => update("imap_host", event.target.value)} required />
-          </label>
-          <label>
-            IMAP Port
-            <input type="number" value={form.imap_port} onChange={(event) => update("imap_port", Number(event.target.value))} required />
-          </label>
-          <label>
-            SMTP Host
-            <input value={form.smtp_host} onChange={(event) => update("smtp_host", event.target.value)} required />
-          </label>
-          <label>
-            SMTP Port
-            <input type="number" value={form.smtp_port} onChange={(event) => update("smtp_port", Number(event.target.value))} required />
-          </label>
-        </div>
-        <div className="modal-status">{testResult}</div>
-        <footer>
-          <button type="button" onClick={testConnection}>
-            TEST
-          </button>
-          <button type="submit" disabled={isSaving}>
-            {isSaving ? "LINKING" : "SAVE"}
-          </button>
-        </footer>
-      </form>
-    </div>
   );
 }
 

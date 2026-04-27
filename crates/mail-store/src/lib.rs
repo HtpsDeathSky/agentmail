@@ -64,6 +64,7 @@ impl MailStore {
               id TEXT PRIMARY KEY,
               display_name TEXT NOT NULL,
               email TEXT NOT NULL,
+              password TEXT NOT NULL DEFAULT '',
               imap_host TEXT NOT NULL,
               imap_port INTEGER NOT NULL,
               imap_tls INTEGER NOT NULL,
@@ -226,9 +227,60 @@ impl MailStore {
             "failure_count",
             "ALTER TABLE sync_states ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0",
         )?;
+        ensure_column(
+            &conn,
+            "accounts",
+            "password",
+            "ALTER TABLE accounts ADD COLUMN password TEXT NOT NULL DEFAULT ''",
+        )?;
         conn.execute(
             "UPDATE sync_states SET folder_id = '' WHERE folder_id IS NULL",
             [],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_account_with_password(
+        &self,
+        account: &MailAccount,
+        password: &str,
+    ) -> StoreResult<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            r#"
+            INSERT INTO accounts (
+              id, display_name, email, password, imap_host, imap_port, imap_tls,
+              smtp_host, smtp_port, smtp_tls, sync_enabled, created_at, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ON CONFLICT(id) DO UPDATE SET
+              display_name=excluded.display_name,
+              email=excluded.email,
+              password=excluded.password,
+              imap_host=excluded.imap_host,
+              imap_port=excluded.imap_port,
+              imap_tls=excluded.imap_tls,
+              smtp_host=excluded.smtp_host,
+              smtp_port=excluded.smtp_port,
+              smtp_tls=excluded.smtp_tls,
+              sync_enabled=excluded.sync_enabled,
+              updated_at=excluded.updated_at
+            "#,
+            params![
+                account.id,
+                account.display_name,
+                account.email,
+                password,
+                account.imap_host,
+                account.imap_port,
+                account.imap_tls,
+                account.smtp_host,
+                account.smtp_port,
+                account.smtp_tls,
+                account.sync_enabled,
+                account.created_at,
+                account.updated_at,
+            ],
         )?;
         Ok(())
     }
@@ -285,6 +337,17 @@ impl MailStore {
 
         let rows = stmt.query_map([], account_from_row)?;
         collect_rows(rows)
+    }
+
+    pub fn get_account_password(&self, id: &str) -> StoreResult<String> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT password FROM accounts WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::NotFound(format!("account {id}")))
     }
 
     pub fn get_account(&self, id: &str) -> StoreResult<MailAccount> {
@@ -1392,6 +1455,47 @@ mod tests {
         assert_eq!(states[0].folder_id, None);
         assert_eq!(states[0].last_uid.as_deref(), Some("11"));
         assert_eq!(states[0].failure_count, 0);
+    }
+
+    #[test]
+    fn account_password_is_stored_in_sqlite_plaintext() {
+        let store = MailStore::memory().unwrap();
+        let now = now_rfc3339();
+        let mut account = MailAccount {
+            id: "acct".to_string(),
+            display_name: "Ops".to_string(),
+            email: "ops@example.com".to_string(),
+            imap_host: "imap.example.com".to_string(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_port: 465,
+            smtp_tls: true,
+            sync_enabled: true,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+
+        store
+            .save_account_with_password(&account, "imap-smtp-secret")
+            .unwrap();
+        assert_eq!(
+            store.get_account_password(&account.id).unwrap(),
+            "imap-smtp-secret"
+        );
+
+        account.smtp_port = 587;
+        account.updated_at = now_rfc3339();
+        store
+            .save_account_with_password(&account, "updated-secret")
+            .unwrap();
+
+        let updated = store.get_account(&account.id).unwrap();
+        assert_eq!(updated.smtp_port, 587);
+        assert_eq!(
+            store.get_account_password(&account.id).unwrap(),
+            "updated-secret"
+        );
     }
 
     #[test]

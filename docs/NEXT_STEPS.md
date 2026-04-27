@@ -7,10 +7,11 @@ Last updated: 2026-04-27
 - [ ] Download the latest GitHub Actions `agentmail-windows-bundles` artifact from `main`.
 - [ ] Install and launch the app on Windows.
 - [ ] Confirm the app starts without an extra black terminal window.
-- [ ] Add a real mailbox and confirm IMAP/SMTP connection tests pass.
+- [ ] Add or edit a real mailbox through the unified configuration UI and confirm IMAP/SMTP connection tests pass.
+- [ ] Close and reopen configuration, then confirm IMAP/SMTP host, port, TLS, email, and password fields are still populated from SQLite.
 - [ ] Sync folders and confirm folder counts show synced totals and unread counts.
 - [ ] Open several folders and confirm message lists are folder-specific.
-- [ ] Configure an HTTPS OpenAI-compatible AI endpoint.
+- [ ] Configure an HTTPS OpenAI-compatible AI endpoint from the unified configuration UI.
 - [ ] Analyze one non-sensitive test message and confirm the summary is concise Simplified Chinese.
 - [ ] Compose a message and confirm it appears in `PENDING ACTIONS`.
 - [ ] Confirm the pending send and verify delivery.

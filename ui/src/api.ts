@@ -82,6 +82,18 @@ export interface AddAccountRequest {
   smtp_tls: boolean;
 }
 
+export interface AccountConfigView extends AddAccountRequest {
+  id: string;
+  sync_enabled: boolean;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface SaveAccountConfigRequest extends AddAccountRequest {
+  id?: string | null;
+  sync_enabled: boolean;
+}
+
 export interface ConnectionTestResult {
   imap_ok: boolean;
   smtp_ok: boolean;
@@ -200,6 +212,8 @@ type CommandMap = {
   add_account: MailAccount;
   test_account_connection: ConnectionTestResult;
   list_accounts: MailAccount[];
+  get_account_config: AccountConfigView;
+  save_account_config: MailAccount;
   sync_account: SyncSummary;
   get_sync_status: SyncState[];
   list_folders: MailFolder[];
@@ -230,9 +244,11 @@ async function call<T extends keyof CommandMap>(command: T, args?: Record<string
 
 export const api = {
   addAccount: (request: AddAccountRequest) => call("add_account", { request }),
-  testAccountConnection: (request: AddAccountRequest) =>
+  testAccountConnection: (request: AddAccountRequest | SaveAccountConfigRequest) =>
     call("test_account_connection", { request: { account_id: null, manual: request } }),
   listAccounts: () => call("list_accounts"),
+  getAccountConfig: (accountId: string) => call("get_account_config", { accountId }),
+  saveAccountConfig: (request: SaveAccountConfigRequest) => call("save_account_config", { request }),
   syncAccount: (accountId: string) => call("sync_account", { accountId }),
   getSyncStatus: (accountId: string) => call("get_sync_status", { accountId }),
   listFolders: (accountId: string) => call("list_folders", { accountId }),

@@ -36,7 +36,7 @@ button {
 
 .app-shell {
   display: grid;
-  grid-template-rows: 58px minmax(0, 1fr) 136px;
+  grid-template-rows: 58px minmax(0, 1fr) minmax(154px, 24vh);
   width: 100vw;
   height: 100vh;
   color: #d7ddd8;
@@ -692,6 +692,7 @@ button {
   gap: 5px;
   min-width: 0;
   min-height: 0;
+  overflow: auto;
   padding: 8px 10px;
   border: 1px solid #303a36;
   border-radius: 3px;
@@ -751,25 +752,27 @@ button {
 }
 
 .audit-feed {
-  overflow: hidden;
+  overflow: auto;
 }
 
 .audit-feed p {
   margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .audit-feed code {
+  display: block;
   padding: 3px 6px;
+  overflow-wrap: anywhere;
   border: 1px solid #2f3934;
   border-radius: 3px;
   background: #111615;
+  white-space: normal;
 }
 
 .pending-feed {
-  overflow: hidden;
+  overflow: auto;
 }
 
 .pending-feed p {
@@ -794,9 +797,8 @@ button {
 
 .pending-action-row span {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .pending-action-row div {
@@ -899,11 +901,13 @@ button {
 .modal-status {
   min-height: 28px;
   padding: 7px 9px;
+  overflow-wrap: anywhere;
   border: 1px solid #303a36;
   border-radius: 4px;
   background: #0f1312;
   color: #d0b66a;
   font-size: 11px;
+  white-space: normal;
 }
 
 .composer-panel {
@@ -930,6 +934,134 @@ button {
 }
 
 .ai-settings-form .checkbox-row input {
+  width: 16px;
+  min-height: 16px;
+  accent-color: #a9b86f;
+}
+
+.configuration-panel {
+  display: block;
+  width: min(920px, 100%);
+  max-height: min(760px, calc(100vh - 24px));
+  overflow: auto;
+}
+
+.config-tabs {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+  border-bottom: 1px solid #303a36;
+}
+
+.config-tabs button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 4px 4px 0 0;
+  background: transparent;
+  color: #8b968f;
+  font: 11px "Cascadia Mono", Consolas, monospace;
+}
+
+.config-tabs button.active {
+  border-color: #3c4841;
+  background: #101413;
+  color: #e5ebe4;
+}
+
+.config-body {
+  display: grid;
+  grid-template-columns: 230px minmax(0, 1fr);
+  gap: 14px;
+  min-height: 0;
+  margin-top: 14px;
+}
+
+.config-account-list {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.config-account-list button {
+  display: grid;
+  justify-content: start;
+  justify-items: start;
+  min-height: 42px;
+  padding: 8px 10px;
+}
+
+.config-account-list button:first-child {
+  display: inline-flex;
+  justify-content: center;
+  min-height: 34px;
+}
+
+.config-account-list button.active {
+  border-color: #697568;
+  background: #1f2723;
+}
+
+.config-account-list span,
+.config-account-list small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-account-list small {
+  color: #7e8982;
+  font-size: 11px;
+}
+
+.config-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  min-height: 0;
+  overflow: visible;
+}
+
+.config-form-grid .modal-status {
+  grid-column: 1 / 2;
+}
+
+.config-form-grid footer {
+  grid-column: 2 / -1;
+  align-self: end;
+  margin-top: 0;
+}
+
+.config-form-grid .modal-status:only-child {
+  grid-column: 1 / -1;
+}
+
+.config-ai-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.config-ai-form .checkbox-row,
+.config-ai-form .modal-status,
+.config-ai-form footer {
+  grid-column: 1 / -1;
+}
+
+.configuration-panel .checkbox-row {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  justify-content: start;
+}
+
+.configuration-panel .checkbox-row input {
   width: 16px;
   min-height: 16px;
   accent-color: #a9b86f;
@@ -969,5 +1101,18 @@ button {
   .form-grid,
   .metadata-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 719px) {
+  .config-body,
+  .config-form-grid,
+  .config-ai-form {
+    grid-template-columns: 1fr;
+  }
+
+  .config-form-grid .modal-status,
+  .config-form-grid footer {
+    grid-column: 1 / -1;
   }
 }

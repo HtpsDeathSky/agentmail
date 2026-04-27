@@ -8,7 +8,6 @@ ai-remote = { path = "../ai-remote" }
 mail-core = { path = "../mail-core" }
 mail-protocol = { path = "../mail-protocol" }
 mail-store = { path = "../mail-store" }
-secret-store = { path = "../secret-store" }
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true

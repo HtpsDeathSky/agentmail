@@ -1,22 +1,23 @@
 # AgentMail
 
-Windows-first desktop mail client MVP built with Tauri v2, Rust, React/Vite, SQLite, and Windows Credential Manager.
+Windows-first desktop mail client MVP built with Tauri v2, Rust, React/Vite, and SQLite.
 
 ## Current MVP
 
-- Manual IMAP/SMTP account setup with real connection tests.
+- Unified configuration for editable IMAP/SMTP account setup with real connection tests.
 - SQLite-backed accounts, folders, messages, sync state, FTS5 search, and action audit log.
-- Secret-store abstraction using Windows Credential Manager on Windows and in-memory storage for non-Windows/dev tests.
+- IMAP/SMTP account passwords are stored plaintext in SQLite for this MVP.
 - Replaceable mail protocol boundary. The desktop backend uses `LiveMailProtocol`; tests and browser demo fallback use `MockMailProtocol`.
 - All selectable IMAP folders sync through UID search/fetch with per-folder sync state, MIME parsing,正文文本存储, and attachment metadata indexing without downloading attachment files.
 - SMTP send through `lettre`; port `465` uses implicit TLS and port `587` uses STARTTLS.
 - Account-level sync locking plus per-folder failure counts and short exponential backoff after sync failures.
 - Pending action queue for high-risk actions. SMTP send is queued first and only executes after explicit confirmation.
 - Tauri startup triggers background sync for accounts with `sync_enabled=true`.
-- Desktop UI shell with account/folder rail, message list, detail pane, compose modal, search, sync controls, and bottom operations console.
+- Desktop UI shell with account/folder rail, message list, detail pane, compose modal, unified configuration modal, search, sync controls, and bottom operations console.
 - AI analysis is manual only for the selected message. The remote provider must expose an HTTPS OpenAI-compatible API.
 - AI summaries are prompted to be concise Simplified Chinese.
 - AI API keys are stored plaintext in SQLite for this MVP. After save, the full key is not returned to the UI.
+- All mail accounts share one global AI model configuration.
 - Windows app binaries are configured as GUI apps and should not open an extra terminal window.
 
 ## Project Handoff Memory
@@ -42,7 +43,7 @@ pnpm install
 pnpm dev
 pnpm build
 pnpm test
-cargo test -p mail-core -p mail-store -p secret-store -p mail-protocol -p ai-remote -p app-api
+cargo test -p mail-core -p mail-store -p mail-protocol -p ai-remote -p app-api
 cargo fmt --all --check
 ```
 
