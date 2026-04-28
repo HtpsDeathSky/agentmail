@@ -148,13 +148,19 @@ async fn sync_folder_after_change(
                 );
                 return;
             }
-            Err(ApiError::SyncAlreadyRunning(_)) => {
+            Err(
+                ApiError::SyncAlreadyRunning(_)
+                | ApiError::SyncBackoff { .. }
+                | ApiError::Protocol(_)
+                | ApiError::Store(_),
+            ) => {
                 tokio::time::sleep(WATCHER_RETRY_DELAY).await;
             }
-            Err(_) => {
-                tokio::time::sleep(WATCHER_RETRY_DELAY).await;
-                return;
-            }
+            Err(
+                ApiError::InvalidRequest(_)
+                | ApiError::ConfirmationRequired(_)
+                | ApiError::AiRemote(_),
+            ) => return,
         }
     }
 }
