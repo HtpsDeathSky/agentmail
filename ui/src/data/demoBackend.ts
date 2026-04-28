@@ -475,7 +475,7 @@ export const demoBackend = {
         sentFolder.total_count = messages.filter((message) => message.folder_id === sentFolder.id && !message.deleted_at).length;
         sentFolder.unread_count = messages.filter((message) => message.folder_id === sentFolder.id && !message.deleted_at && !message.flags.is_read).length;
         recordAudit("send", draft.account_id, [messageId], "executed");
-        return messageId;
+        return { message_id: messageId, warning: null };
       }
       case "get_audit_log":
         return audits;

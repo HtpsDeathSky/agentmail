@@ -9,7 +9,8 @@ use mail_core::{
     ConnectionTestResult, FolderRole, FolderWatchOutcome, MailAccount, MailActionAudit,
     MailActionKind, MailActionRequest, MailActionResult, MailActionResultKind, MailFolder,
     MailMessage, MessageFetchRequest, MessageQuery, PendingActionStatus, PendingMailAction,
-    RemoteMailAction, SaveAiSettingsRequest, SendMessageDraft, SyncState, SyncStateKind,
+    RemoteMailAction, SaveAiSettingsRequest, SendMessageDraft, SendMessageResult, SyncState,
+    SyncStateKind,
 };
 use mail_protocol::{validate_mailbox_address, LiveMailProtocol, MailProtocol, ProtocolError};
 use mail_store::{MailStore, MessageFlagPatch, StoreError};
@@ -587,12 +588,15 @@ impl AppApi {
         })
     }
 
-    pub async fn send_message(&self, draft: SendMessageDraft) -> ApiResult<String> {
-        if draft.to.is_empty() {
+    pub async fn send_message(&self, draft: SendMessageDraft) -> ApiResult<SendMessageResult> {
+        let to = normalize_address_list(&draft.to);
+        if to.is_empty() {
             return Err(ApiError::InvalidRequest(
                 "recipient list is empty".to_string(),
             ));
         }
+        let cc = normalize_address_list(&draft.cc);
+        let draft = SendMessageDraft { to, cc, ..draft };
         let account = self.store.get_account(&draft.account_id)?;
         let now = now_rfc3339();
         let message_id = new_id();
@@ -648,18 +652,33 @@ impl AppApi {
             error_message: None,
             created_at: now,
         };
-        self.store
-            .save_direct_sent_message(&sent, &sent_message, &audit)?;
+        if let Err(err) = self
+            .store
+            .save_direct_sent_message(&sent, &sent_message, &audit)
+        {
+            return Ok(SendMessageResult {
+                message_id,
+                warning: Some(format!("sent but local persistence failed: {err}")),
+            });
+        }
+        let mut warning = None;
         if account.sync_enabled {
             if self
                 .reconcile_sent_placeholders_after_send(&account.id)
                 .await
                 .is_ok()
             {
-                self.cleanup_direct_sent_copy_after_reconcile(&account.id, &message_id)?;
+                if let Err(err) =
+                    self.cleanup_direct_sent_copy_after_reconcile(&account.id, &message_id)
+                {
+                    warning = Some(format!("sent but local cleanup failed: {err}"));
+                }
             }
         }
-        Ok(message_id)
+        Ok(SendMessageResult {
+            message_id,
+            warning,
+        })
     }
 
     pub fn list_pending_actions(
@@ -1298,9 +1317,9 @@ impl AppApi {
 
     fn direct_action_for_request(&self, request: &MailActionRequest) -> ApiResult<MailActionKind> {
         match request.action {
-            MailActionKind::Delete => {
+            MailActionKind::Delete | MailActionKind::BatchDelete => {
                 if request.message_ids.is_empty() {
-                    return Ok(MailActionKind::Delete);
+                    return Ok(request.action);
                 }
                 let first_message = self.store.get_message(&request.message_ids[0])?;
                 if first_message.account_id != request.account_id {
@@ -1312,7 +1331,9 @@ impl AppApi {
                 let source_folder = self.store.get_folder(&first_message.folder_id)?;
                 if source_folder.role == FolderRole::Trash {
                     Ok(MailActionKind::PermanentDelete)
-                } else if request.message_ids.len() > 1 {
+                } else if request.action == MailActionKind::BatchDelete
+                    || request.message_ids.len() > 1
+                {
                     Ok(MailActionKind::BatchDelete)
                 } else {
                     Ok(MailActionKind::Delete)
@@ -1544,6 +1565,15 @@ fn body_preview_from_body(body: &str) -> String {
         return "(empty message)".to_string();
     }
     trimmed.chars().take(180).collect()
+}
+
+fn normalize_address_list(addresses: &[String]) -> Vec<String> {
+    addresses
+        .iter()
+        .map(|address| address.trim())
+        .filter(|address| !address.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 fn direct_sent_remote_copy_matches(local: &MailMessage, remote: &MailMessage) -> bool {
@@ -2577,7 +2607,7 @@ mod tests {
         let account = add_sample_account(&api).await;
         let sent = save_sent_folder(&api, &account);
 
-        let sent_message_id = api
+        let send_result = api
             .send_message(SendMessageDraft {
                 account_id: account.id.clone(),
                 to: vec!["sec@example.com".to_string()],
@@ -2588,6 +2618,8 @@ mod tests {
             })
             .await
             .unwrap();
+        let sent_message_id = send_result.message_id;
+        assert_eq!(send_result.warning, None);
 
         let sends = sends.lock();
         assert_eq!(sends.len(), 1);
@@ -2668,13 +2700,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_message_rejects_blank_recipients_before_protocol_or_audit() {
+        let protocol = RecordingProtocol::default();
+        let sends = Arc::clone(&protocol.sends);
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        let audit_count = api.get_audit_log(Some(10)).unwrap().len();
+
+        let err = api
+            .send_message(SendMessageDraft {
+                account_id: account.id.clone(),
+                to: vec!["  ".to_string()],
+                cc: vec!["".to_string()],
+                subject: "Blank recipient".to_string(),
+                body: "body".to_string(),
+                message_id_header: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("recipient list is empty"));
+        assert!(sends.lock().is_empty());
+        let audits = api.get_audit_log(Some(10)).unwrap();
+        assert_eq!(audits.len(), audit_count);
+        assert!(audits
+            .iter()
+            .all(|audit| audit.action != MailActionKind::Send));
+    }
+
+    #[tokio::test]
     async fn send_message_creates_fallback_sent_folder_for_direct_send() {
         let protocol = RecordingProtocol::default();
         let sends = Arc::clone(&protocol.sends);
         let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
         let account = add_sample_account(&api).await;
 
-        let sent_message_id = api
+        let send_result = api
             .send_message(SendMessageDraft {
                 account_id: account.id.clone(),
                 to: vec!["sec@example.com".to_string()],
@@ -2685,6 +2746,8 @@ mod tests {
             })
             .await
             .unwrap();
+        let sent_message_id = send_result.message_id;
+        assert_eq!(send_result.warning, None);
 
         assert_eq!(sends.lock().len(), 1);
         let sent = api
@@ -2779,6 +2842,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_batch_delete_from_trash_executes_as_permanent_delete() {
+        let protocol = RecordingProtocol::default();
+        let actions = Arc::clone(&protocol.actions);
+        let trash_refetch_uid = Arc::clone(&protocol.trash_refetch_uid);
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        api.sync_account(account.id.clone()).await.unwrap();
+        let message = first_message(&api, &account.id);
+        let second = MailMessage {
+            id: format!("{}:second-trash", message.id),
+            uid: Some("43".to_string()),
+            message_id_header: Some("<43@example.com>".to_string()),
+            subject: "Second trash action".to_string(),
+            body_preview: "second trash".to_string(),
+            body: Some("second trash".to_string()),
+            ..message.clone()
+        };
+        api.store.upsert_message(&second).unwrap();
+
+        api.execute_mail_action(MailActionRequest {
+            action: MailActionKind::Delete,
+            account_id: account.id.clone(),
+            message_ids: vec![message.id.clone(), second.id.clone()],
+            target_folder_id: None,
+        })
+        .await
+        .unwrap();
+        *trash_refetch_uid.lock() = Some("900".to_string());
+
+        let result = api
+            .execute_mail_action(MailActionRequest {
+                action: MailActionKind::BatchDelete,
+                account_id: account.id.clone(),
+                message_ids: vec![message.id.clone(), second.id.clone()],
+                target_folder_id: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.kind, MailActionResultKind::Executed);
+        let recorded = actions.lock();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[1].action, MailActionKind::PermanentDelete);
+        assert_eq!(recorded[1].source_folder.role, FolderRole::Trash);
+        assert_eq!(recorded[1].target_folder, None);
+        assert_eq!(recorded[1].uids, vec!["900".to_string()]);
+    }
+
+    #[tokio::test]
     async fn batch_move_executes_directly_after_normalization() {
         let protocol = RecordingProtocol::default();
         let actions = Arc::clone(&protocol.actions);
@@ -2866,7 +2978,8 @@ mod tests {
                 message_id_header: None,
             })
             .await
-            .unwrap();
+            .unwrap()
+            .message_id;
 
         let result = api
             .execute_mail_action(MailActionRequest {
@@ -2918,7 +3031,8 @@ mod tests {
                 message_id_header: Some(known_header),
             })
             .await
-            .unwrap();
+            .unwrap()
+            .message_id;
 
         let real_sent = api
             .store
@@ -2966,7 +3080,8 @@ mod tests {
                 message_id_header: Some("<local-generated@agentmail.local>".to_string()),
             })
             .await
-            .unwrap();
+            .unwrap()
+            .message_id;
 
         let real_sent = api
             .store
@@ -3024,7 +3139,8 @@ mod tests {
                 message_id_header: Some("<local-generated@agentmail.local>".to_string()),
             })
             .await
-            .unwrap();
+            .unwrap()
+            .message_id;
 
         let real_sent = api
             .store

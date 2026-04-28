@@ -270,6 +270,12 @@ pub struct SendMessageDraft {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SendMessageResult {
+    pub message_id: String,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConnectionSettings {
     pub account_id: Option<String>,
     pub email: String,

@@ -48,6 +48,7 @@ import {
   SaveAccountConfigRequest,
   SaveAiSettingsRequest,
   SendMessageDraft,
+  SendMessageResult,
   SyncState,
   SyncSummary
 } from "./api";
@@ -123,7 +124,7 @@ type DirectSendFlowRequest = {
   draft: SendMessageDraft;
   selectedFolderId: string | null;
   query: string;
-  sendMessage: (draft: SendMessageDraft) => Promise<unknown>;
+  sendMessage: (draft: SendMessageDraft) => Promise<SendMessageResult>;
   refreshFolders: (accountId: string) => Promise<void>;
   refreshMessages: (accountId: string, folderId: string | null, query: string) => Promise<void>;
   refreshAudits: () => Promise<void>;
@@ -153,8 +154,9 @@ export async function runDirectSendFlow({
   refreshMessages,
   refreshAudits
 }: DirectSendFlowRequest): Promise<DirectSendFlowResult> {
+  let sendResult: SendMessageResult;
   try {
-    await sendMessage(draft);
+    sendResult = await sendMessage(draft);
   } catch (error) {
     await Promise.allSettled([refreshAudits()]);
     return {
@@ -169,11 +171,14 @@ export async function runDirectSendFlow({
     refreshMessages(draft.account_id, selectedFolderId, query),
     refreshAudits()
   ]);
-  const refreshError = firstRejectedReason(refreshResults);
   const sentStatus = formatSendStatus(draft.to);
+  const statusParts = [sentStatus];
+  if (sendResult.warning) statusParts.push(sendResult.warning);
+  const refreshError = firstRejectedReason(refreshResults);
+  if (refreshError) statusParts.push(`refresh failed: ${String(refreshError)}`);
   return {
     ok: true,
-    status: refreshError ? `${sentStatus} / refresh failed: ${String(refreshError)}` : sentStatus
+    status: statusParts.join(" / ")
   };
 }
 

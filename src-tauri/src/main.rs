@@ -13,7 +13,7 @@ use app_api::{
 use mail_core::{
     AiInsight, AiSettingsView, ConnectionTestResult, MailAccount, MailActionAudit,
     MailActionRequest, MailActionResult, MailFolder, MailMessage, MessageQuery, PendingMailAction,
-    SaveAiSettingsRequest, SendMessageDraft, SyncState,
+    SaveAiSettingsRequest, SendMessageDraft, SendMessageResult, SyncState,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -157,7 +157,7 @@ async fn execute_mail_action(
 async fn send_message(
     state: State<'_, ApiState>,
     draft: SendMessageDraft,
-) -> Result<String, String> {
+) -> Result<SendMessageResult, String> {
     state.api.send_message(draft).await.map_err(to_error)
 }
 

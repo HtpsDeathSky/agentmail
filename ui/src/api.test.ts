@@ -88,13 +88,15 @@ describe("api demo AI bindings", () => {
       sync_enabled: true
     });
 
-    const sentMessageId = await api.sendMessage({
+    const sendResult = await api.sendMessage({
       account_id: account.id,
       to: ["sec@example.com"],
       cc: ["ops-lead@example.com"],
       subject: "Demo direct send",
       body: "Visible after SMTP success"
     });
+    const sentMessageId = sendResult.message_id;
+    expect(sendResult.warning).toBeNull();
 
     const sentFolder = (await api.listFolders(account.id)).find(
       (folder) => folder.account_id === account.id && folder.role === "sent"
@@ -344,13 +346,14 @@ describe("api demo AI bindings", () => {
       smtp_tls: true,
       sync_enabled: true
     });
-    const messageId = await api.sendMessage({
+    const sendResult = await api.sendMessage({
       account_id: account.id,
       to: ["sec@example.com"],
       cc: [],
       subject: "Delete requires Trash",
       body: "This message should remain in Sent when Trash is missing."
     });
+    const messageId = sendResult.message_id;
     const sentFolder = (await api.listFolders(account.id)).find((folder) => folder.account_id === account.id && folder.role === "sent");
     expect(sentFolder).toBeDefined();
     expect((await api.listFolders(account.id)).some((folder) => folder.account_id === account.id && folder.role === "trash")).toBe(false);
@@ -388,13 +391,14 @@ describe("api demo AI bindings", () => {
       smtp_tls: true,
       sync_enabled: true
     });
-    const messageId = await api.sendMessage({
+    const sendResult = await api.sendMessage({
       account_id: account.id,
       to: ["sec@example.com"],
       cc: [],
       subject: "Archive requires Archive",
       body: "This message should remain in Sent when Archive is missing."
     });
+    const messageId = sendResult.message_id;
     const sentFolder = (await api.listFolders(account.id)).find((folder) => folder.account_id === account.id && folder.role === "sent");
     expect(sentFolder).toBeDefined();
     expect((await api.listFolders(account.id)).some((folder) => folder.account_id === account.id && folder.role === "archive")).toBe(false);
@@ -464,13 +468,14 @@ describe("api demo AI bindings", () => {
       smtp_tls: true,
       sync_enabled: true
     });
-    const otherAccountMessageId = await api.sendMessage({
+    const otherAccountSendResult = await api.sendMessage({
       account_id: account.id,
       to: ["sec@example.com"],
       cc: [],
       subject: "Wrong account validation",
       body: "This message belongs to a different demo account."
     });
+    const otherAccountMessageId = otherAccountSendResult.message_id;
 
     await expect(
       api.executeMailAction({

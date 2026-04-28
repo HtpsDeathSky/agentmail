@@ -164,6 +164,11 @@ export interface SendMessageDraft {
   message_id_header?: string | null;
 }
 
+export interface SendMessageResult {
+  message_id: string;
+  warning?: string | null;
+}
+
 export type AiPriority = "low" | "normal" | "high" | "urgent";
 
 export interface AiSettingsView {
@@ -210,7 +215,7 @@ type CommandMap = {
   get_message: MailMessage;
   search_messages: MailMessage[];
   execute_mail_action: MailActionResult;
-  send_message: string;
+  send_message: SendMessageResult;
   get_audit_log: MailActionAudit[];
   get_ai_settings: AiSettingsView | null;
   save_ai_settings: AiSettingsView;

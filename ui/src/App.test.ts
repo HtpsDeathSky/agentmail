@@ -52,7 +52,7 @@ describe("runDirectSendFlow", () => {
       draft,
       selectedFolderId: "acct-1:sent",
       query: "release",
-      sendMessage: vi.fn().mockResolvedValue("sent-id"),
+      sendMessage: vi.fn().mockResolvedValue({ message_id: "sent-id", warning: null }),
       refreshFolders: vi.fn().mockRejectedValue(new Error("folder index unavailable")),
       refreshMessages: vi.fn().mockResolvedValue(undefined),
       refreshAudits: vi.fn().mockResolvedValue(undefined)
@@ -61,6 +61,26 @@ describe("runDirectSendFlow", () => {
     expect(result).toEqual({
       ok: true,
       status: "sent to ops@example.com / refresh failed: Error: folder index unavailable"
+    });
+  });
+
+  it("keeps sent status visible when the backend reports a post-send warning", async () => {
+    const result = await runDirectSendFlow({
+      draft,
+      selectedFolderId: "acct-1:sent",
+      query: "",
+      sendMessage: vi.fn().mockResolvedValue({
+        message_id: "sent-id",
+        warning: "sent but local persistence failed: database is locked"
+      }),
+      refreshFolders: vi.fn().mockResolvedValue(undefined),
+      refreshMessages: vi.fn().mockResolvedValue(undefined),
+      refreshAudits: vi.fn().mockResolvedValue(undefined)
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      status: "sent to ops@example.com / sent but local persistence failed: database is locked"
     });
   });
 
