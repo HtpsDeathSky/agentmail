@@ -686,6 +686,7 @@ impl AppApi {
                     let _ = self
                         .reconcile_sent_placeholders_after_send(&pending.account_id)
                         .await;
+                    let _ = self.cleanup_pending_send_placeholder(&pending);
                 }
                 send_result.map(|_| ())
             }
@@ -889,6 +890,16 @@ impl AppApi {
             ));
         }
         let account = self.store.get_account(&request.account_id)?;
+        if self.apply_local_uidless_sent_delete(request)? {
+            self.write_audit(
+                &request.account_id,
+                request.action,
+                request.message_ids.clone(),
+                ActionAuditStatus::Executed,
+                None,
+            )?;
+            return Ok(());
+        }
         let remote_action = self.build_remote_action(&account, request).await?;
         let settings = self.connection_settings_for_account(&account)?;
 
@@ -1185,6 +1196,56 @@ impl AppApi {
             .soft_delete_messages(std::slice::from_ref(message_id))?;
         self.store.refresh_folder_counts(&message.folder_id)?;
         Ok(())
+    }
+
+    fn apply_local_uidless_sent_delete(&self, request: &MailActionRequest) -> ApiResult<bool> {
+        if !matches!(
+            request.action,
+            MailActionKind::Delete | MailActionKind::BatchDelete
+        ) {
+            return Ok(false);
+        }
+
+        let mut messages = Vec::with_capacity(request.message_ids.len());
+        for message_id in &request.message_ids {
+            let message = self.store.get_message(message_id)?;
+            if message.account_id != request.account_id {
+                return Err(ApiError::InvalidRequest(format!(
+                    "message {message_id} does not belong to account {}",
+                    request.account_id
+                )));
+            }
+            if message.deleted_at.is_some() {
+                return Err(ApiError::InvalidRequest(format!(
+                    "message {message_id} is locally deleted"
+                )));
+            }
+            messages.push(message);
+        }
+        if messages.iter().any(|message| message.uid.is_some()) {
+            return Ok(false);
+        }
+
+        let source_folder_id = messages
+            .first()
+            .map(|message| message.folder_id.clone())
+            .ok_or_else(|| ApiError::InvalidRequest("message_ids cannot be empty".to_string()))?;
+        if messages
+            .iter()
+            .any(|message| message.folder_id != source_folder_id)
+        {
+            return Err(ApiError::InvalidRequest(
+                "all messages in one action must be in the same folder".to_string(),
+            ));
+        }
+        let source_folder = self.store.get_folder(&source_folder_id)?;
+        if source_folder.role != FolderRole::Sent {
+            return Ok(false);
+        }
+
+        self.store.soft_delete_messages(&request.message_ids)?;
+        self.store.refresh_folder_counts(&source_folder.id)?;
+        Ok(true)
     }
 
     fn converge_fallback_sent_placeholders(
@@ -2506,6 +2567,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_uidless_sent_placeholder_soft_deletes_local_message() {
+        let protocol = RecordingProtocol::default();
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        let sent = save_sent_folder(&api, &account);
+
+        let pending_id = api
+            .send_message(SendMessageDraft {
+                account_id: account.id.clone(),
+                to: vec!["sec@example.com".to_string()],
+                cc: Vec::new(),
+                subject: "Delete local sent placeholder".to_string(),
+                body: "body".to_string(),
+                message_id_header: None,
+            })
+            .await
+            .unwrap();
+        let pending = api.store.get_pending_action(&pending_id).unwrap();
+        let local_message_id = pending.local_message_id.unwrap();
+
+        let result = api
+            .execute_mail_action(MailActionRequest {
+                action: MailActionKind::Delete,
+                account_id: account.id.clone(),
+                message_ids: vec![local_message_id.clone()],
+                target_folder_id: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.kind, MailActionResultKind::Executed);
+        assert!(api
+            .store
+            .get_message(&local_message_id)
+            .unwrap()
+            .deleted_at
+            .is_some());
+        assert!(api
+            .list_messages(MessageQuery {
+                account_id: Some(account.id.clone()),
+                folder_id: Some(sent.id.clone()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap()
+            .is_empty());
+        assert_eq!(api.store.get_folder(&sent.id).unwrap().total_count, 0);
+    }
+
+    #[tokio::test]
     async fn reject_pending_send_keeps_hydrated_sent_placeholder_visible() {
         let protocol = RecordingProtocol::default();
         let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
@@ -2683,6 +2794,60 @@ mod tests {
                 .total_count,
             0
         );
+        assert_eq!(real_sent.total_count, 1);
+    }
+
+    #[tokio::test]
+    async fn confirm_send_drops_local_sent_placeholder_for_rewritten_message_id() {
+        let sent_message_id = Arc::new(Mutex::new(None));
+        let protocol = SentConvergenceProtocol {
+            sent_message_id: Arc::clone(&sent_message_id),
+        };
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+
+        let pending_id = api
+            .send_message(SendMessageDraft {
+                account_id: account.id.clone(),
+                to: vec!["sec@example.com".to_string()],
+                cc: Vec::new(),
+                subject: "Provider rewrites message id".to_string(),
+                body: "body".to_string(),
+                message_id_header: None,
+            })
+            .await
+            .unwrap();
+        let pending = api.store.get_pending_action(&pending_id).unwrap();
+        let local_message_id = pending.local_message_id.clone().unwrap();
+        *sent_message_id.lock() = Some("<provider-rewritten@example.com>".to_string());
+
+        api.confirm_action(pending_id).await.unwrap();
+
+        let real_sent = api
+            .store
+            .get_folder(&format!("{}:gmail--sent-mail", account.id))
+            .unwrap();
+        let real_sent_messages = api
+            .list_messages(MessageQuery {
+                account_id: Some(account.id.clone()),
+                folder_id: Some(real_sent.id.clone()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(real_sent_messages.len(), 1);
+        assert_ne!(real_sent_messages[0].id, local_message_id);
+        assert_eq!(real_sent_messages[0].uid.as_deref(), Some("501"));
+        assert_eq!(
+            real_sent_messages[0].message_id_header,
+            *sent_message_id.lock()
+        );
+        assert!(api
+            .store
+            .get_message(&local_message_id)
+            .unwrap()
+            .deleted_at
+            .is_some());
         assert_eq!(real_sent.total_count, 1);
     }
 
