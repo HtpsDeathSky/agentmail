@@ -1,9 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   clampWorkspaceSplitPercent,
-  formatAuditLine,
-  formatFolderCount,
-  formatSendStatus,
   getAppShellClassName,
   getWorkspaceSplitModel,
   refreshAfterMailSyncEvent,
@@ -23,6 +20,7 @@ import {
   WORKSPACE_SPLIT_STORAGE_KEY,
   THEME_MODE_STORAGE_KEY
 } from "./lib/storage";
+import { formatAuditLine, formatFolderCount, formatSendStatus } from "./lib/format";
 
 describe("formatFolderCount", () => {
   it("shows total count when no messages are unread", () => {

@@ -63,6 +63,8 @@ import {
   writeStoredWorkspaceSplitPercent,
   type ThemeMode
 } from "./lib/storage";
+import { actionLabels } from "./lib/mailActions";
+import { formatAuditLine, formatFolderCount, formatSendStatus, formatSize, formatTime } from "./lib/format";
 
 const defaultAccountConfigForm: SaveAccountConfigRequest = {
   id: null,
@@ -100,30 +102,6 @@ const roleIcon = {
   junk: CircleAlert,
   custom: Folder
 };
-
-const actionLabels: Record<MailActionKind, string> = {
-  mark_read: "READ",
-  mark_unread: "UNREAD",
-  star: "STAR",
-  unstar: "UNSTAR",
-  move: "MOVE",
-  archive: "ARCHIVE",
-  delete: "DELETE",
-  permanent_delete: "PURGE",
-  send: "SEND",
-  forward: "FORWARD",
-  batch_delete: "BATCH DELETE",
-  batch_move: "BATCH MOVE"
-};
-
-export function formatFolderCount(folder: Pick<MailFolder, "unread_count" | "total_count">) {
-  if (folder.unread_count > 0) return `${folder.unread_count}/${folder.total_count}`;
-  return String(folder.total_count);
-}
-
-export function formatSendStatus(recipients: string[]) {
-  return `sent to ${recipients.join(", ")}`;
-}
 
 type DirectSendFlowRequest = {
   draft: SendMessageDraft;
@@ -185,11 +163,6 @@ export async function runDirectSendFlow({
     ok: true,
     status: statusParts.join(" / ")
   };
-}
-
-export function formatAuditLine(audit: MailActionAudit) {
-  const base = `[${formatTime(audit.created_at)}] ${actionLabels[audit.action] ?? audit.action}:${audit.status}`;
-  return audit.error_message ? `${base} / ${audit.error_message}` : base;
 }
 
 export function getAppShellClassName(showActivityLog: boolean) {
@@ -1628,22 +1601,4 @@ function splitAddresses(value: string) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
-}
-
-function formatTime(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "unknown";
-  return new Intl.DateTimeFormat(undefined, {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(date);
-}
-
-function formatSize(value?: number | null) {
-  if (!value) return "0 B";
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
