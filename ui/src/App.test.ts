@@ -1,26 +1,28 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  ACTIVITY_LOG_STORAGE_KEY,
-  applyThemeModeToDocument,
   clampWorkspaceSplitPercent,
   formatAuditLine,
   formatFolderCount,
   formatSendStatus,
   getAppShellClassName,
   getWorkspaceSplitModel,
-  getNextThemeMode,
-  readStoredActivityLogVisibility,
-  readStoredWorkspaceSplitPercent,
-  readStoredThemeMode,
   refreshAfterMailSyncEvent,
   runDirectSendFlow,
   runAutomaticAccountSync,
   runInitialAccountSync,
-  runManualAccountSync,
+  runManualAccountSync
+} from "./App";
+import {
+  ACTIVITY_LOG_STORAGE_KEY,
+  applyThemeModeToDocument,
+  getNextThemeMode,
+  readStoredActivityLogVisibility,
+  readStoredWorkspaceSplitPercent,
+  readStoredThemeMode,
   writeStoredActivityLogVisibility,
   WORKSPACE_SPLIT_STORAGE_KEY,
   THEME_MODE_STORAGE_KEY
-} from "./App";
+} from "./lib/storage";
 
 describe("formatFolderCount", () => {
   it("shows total count when no messages are unread", () => {
