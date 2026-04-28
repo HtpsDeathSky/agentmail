@@ -8,17 +8,31 @@ import type {
   MailAccount,
   MailActionAudit,
   MailActionResult,
+  MailActionKind,
   MailActionRequest,
   MailFolder,
   MailMessage,
   MessageQuery,
-  PendingMailAction,
   SaveAccountConfigRequest,
   SaveAiSettingsRequest,
   SendMessageDraft,
   SyncState,
   SyncSummary
 } from "../api";
+
+interface DemoPendingMailAction {
+  id: string;
+  account_id: string;
+  action: MailActionKind;
+  message_ids: string[];
+  target_folder_id?: string | null;
+  local_message_id?: string | null;
+  draft?: SendMessageDraft | null;
+  status: "pending" | "accepted" | "rejected" | "executed" | "failed";
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+}
 
 const now = () => new Date().toISOString();
 
@@ -192,7 +206,7 @@ let accounts = [account];
 let accountPasswords: Record<string, string> = {
   [account.id]: "demo-mail-secret"
 };
-let pendingActions: PendingMailAction[] = [];
+let pendingActions: DemoPendingMailAction[] = [];
 let aiSettings: AiSettingsView | null = {
   provider_name: "openai-compatible",
   base_url: "https://api.example.com/v1",
@@ -374,7 +388,7 @@ export const demoBackend = {
           request.action === "batch_delete" ||
           request.action === "batch_move"
         ) {
-          const pending: PendingMailAction = {
+          const pending: DemoPendingMailAction = {
             id: crypto.randomUUID(),
             account_id: request.account_id,
             action: request.action,
@@ -432,7 +446,7 @@ export const demoBackend = {
         const messageId = crypto.randomUUID();
         const messageIdHeader = incomingDraft.message_id_header ?? `<${messageId}@agentmail.local>`;
         const draft: SendMessageDraft = { ...incomingDraft, message_id_header: messageIdHeader };
-        const pending: PendingMailAction = {
+        const pending: DemoPendingMailAction = {
           id: crypto.randomUUID(),
           account_id: draft.account_id,
           action: "send",

@@ -164,20 +164,6 @@ export interface SendMessageDraft {
   message_id_header?: string | null;
 }
 
-export interface PendingMailAction {
-  id: string;
-  account_id: string;
-  action: MailActionKind;
-  message_ids: string[];
-  target_folder_id?: string | null;
-  local_message_id?: string | null;
-  draft?: SendMessageDraft | null;
-  status: "pending" | "accepted" | "rejected" | "executed" | "failed";
-  error_message?: string | null;
-  created_at: Timestamp;
-  updated_at: Timestamp;
-}
-
 export type AiPriority = "low" | "normal" | "high" | "urgent";
 
 export interface AiSettingsView {
@@ -226,9 +212,6 @@ type CommandMap = {
   execute_mail_action: MailActionResult;
   send_message: string;
   get_audit_log: MailActionAudit[];
-  list_pending_actions: PendingMailAction[];
-  confirm_action: MailActionResult;
-  reject_action: null;
   get_ai_settings: AiSettingsView | null;
   save_ai_settings: AiSettingsView;
   clear_ai_settings: null;
@@ -262,9 +245,6 @@ export const api = {
   executeMailAction: (request: MailActionRequest) => call("execute_mail_action", { request }),
   sendMessage: (draft: SendMessageDraft) => call("send_message", { draft }),
   getAuditLog: (limit = 100) => call("get_audit_log", { limit }),
-  listPendingActions: (accountId?: string | null) => call("list_pending_actions", { accountId: accountId ?? null }),
-  confirmAction: (actionId: string) => call("confirm_action", { actionId }),
-  rejectAction: (actionId: string) => call("reject_action", { actionId }),
   getAiSettings: () => call("get_ai_settings"),
   saveAiSettings: (request: SaveAiSettingsRequest) => call("save_ai_settings", { request }),
   clearAiSettings: () => call("clear_ai_settings"),

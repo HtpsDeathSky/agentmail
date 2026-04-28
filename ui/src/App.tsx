@@ -45,7 +45,6 @@ import {
   MailActionKind,
   MailFolder,
   MailMessage,
-  PendingMailAction,
   SaveAccountConfigRequest,
   SaveAiSettingsRequest,
   SendMessageDraft,
@@ -71,6 +70,7 @@ export const MAIL_SYNC_EVENT = "agentmail-mail-sync";
 export const AUTO_SYNC_INTERVAL_MS = 30_000;
 export const THEME_MODE_STORAGE_KEY = "agentmail-theme-mode";
 export const WORKSPACE_SPLIT_STORAGE_KEY = "agentmail-workspace-split-percent";
+export const ACTIVITY_LOG_STORAGE_KEY = "agentmail-show-activity-log";
 export const DEFAULT_WORKSPACE_SPLIT_PERCENT = 45;
 const WORKSPACE_LIST_MIN_WIDTH = 320;
 const WORKSPACE_DETAIL_MIN_WIDTH = 420;
@@ -115,8 +115,66 @@ export function formatFolderCount(folder: Pick<MailFolder, "unread_count" | "tot
   return String(folder.total_count);
 }
 
-export function formatSendQueuedStatus(recipients: string[]) {
-  return `send queued for ${recipients.join(", ")} / confirm SEND in PENDING ACTIONS`;
+export function formatSendStatus(recipients: string[]) {
+  return `sent to ${recipients.join(", ")}`;
+}
+
+type DirectSendFlowRequest = {
+  draft: SendMessageDraft;
+  selectedFolderId: string | null;
+  query: string;
+  sendMessage: (draft: SendMessageDraft) => Promise<unknown>;
+  refreshFolders: (accountId: string) => Promise<void>;
+  refreshMessages: (accountId: string, folderId: string | null, query: string) => Promise<void>;
+  refreshAudits: () => Promise<void>;
+};
+
+type DirectSendFlowResult =
+  | {
+      ok: true;
+      status: string;
+    }
+  | {
+      ok: false;
+      status: string;
+      error: unknown;
+    };
+
+function firstRejectedReason(results: PromiseSettledResult<unknown>[]) {
+  return results.find((result): result is PromiseRejectedResult => result.status === "rejected")?.reason;
+}
+
+export async function runDirectSendFlow({
+  draft,
+  selectedFolderId,
+  query,
+  sendMessage,
+  refreshFolders,
+  refreshMessages,
+  refreshAudits
+}: DirectSendFlowRequest): Promise<DirectSendFlowResult> {
+  try {
+    await sendMessage(draft);
+  } catch (error) {
+    await Promise.allSettled([refreshAudits()]);
+    return {
+      ok: false,
+      status: `send failed: ${String(error)}`,
+      error
+    };
+  }
+
+  const refreshResults = await Promise.allSettled([
+    refreshFolders(draft.account_id),
+    refreshMessages(draft.account_id, selectedFolderId, query),
+    refreshAudits()
+  ]);
+  const refreshError = firstRejectedReason(refreshResults);
+  const sentStatus = formatSendStatus(draft.to);
+  return {
+    ok: true,
+    status: refreshError ? `${sentStatus} / refresh failed: ${String(refreshError)}` : sentStatus
+  };
 }
 
 export function formatAuditLine(audit: MailActionAudit) {
@@ -134,6 +192,26 @@ export function readStoredThemeMode(storage: Pick<Storage, "getItem"> | null | u
 
 export function getNextThemeMode(mode: ThemeMode): ThemeMode {
   return mode === "dark" ? "light" : "dark";
+}
+
+export function readStoredActivityLogVisibility(storage: Pick<Storage, "getItem"> | null | undefined) {
+  try {
+    return storage?.getItem(ACTIVITY_LOG_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function writeStoredActivityLogVisibility(storage: Pick<Storage, "setItem"> | null | undefined, visible: boolean) {
+  try {
+    storage?.setItem(ACTIVITY_LOG_STORAGE_KEY, visible ? "true" : "false");
+  } catch {
+    // Storage can be unavailable in hardened desktop/webview contexts.
+  }
+}
+
+export function getAppShellClassName(showActivityLog: boolean) {
+  return showActivityLog ? "app-shell activity-log-visible" : "app-shell";
 }
 
 export function applyThemeModeToDocument(
@@ -212,7 +290,6 @@ type InitialAccountSyncRequest = {
   refreshMessages: (accountId: string, folderId: string | null, query: string) => Promise<void>;
   refreshSyncState: (accountId: string) => Promise<void>;
   refreshAudits: () => Promise<void>;
-  refreshPendingActions: (accountId: string) => Promise<void>;
 };
 
 export async function runInitialAccountSync({
@@ -226,16 +303,14 @@ export async function runInitialAccountSync({
   refreshFolders,
   refreshMessages,
   refreshSyncState,
-  refreshAudits,
-  refreshPendingActions
+  refreshAudits
 }: InitialAccountSyncRequest) {
   if (!syncEnabled) {
     await Promise.allSettled([
       refreshFolders(accountId),
       refreshMessages(accountId, folderId, query),
       refreshSyncState(accountId),
-      refreshAudits(),
-      refreshPendingActions(accountId)
+      refreshAudits()
     ]);
     return `account configuration saved: ${email}`;
   }
@@ -257,8 +332,7 @@ export async function runInitialAccountSync({
     refreshFolders(accountId),
     refreshMessages(accountId, folderId, query),
     refreshSyncState(accountId),
-    refreshAudits(),
-    refreshPendingActions(accountId)
+    refreshAudits()
   ]);
 
   if (summary) {
@@ -276,7 +350,6 @@ type RefreshAfterMailSyncEventRequest = {
   refreshMessages: (accountId: string, folderId: string | null, query: string) => Promise<void>;
   refreshSyncState: (accountId: string) => Promise<void>;
   refreshAudits: () => Promise<void>;
-  refreshPendingActions: (accountId: string) => Promise<void>;
 };
 
 export async function refreshAfterMailSyncEvent({
@@ -287,8 +360,7 @@ export async function refreshAfterMailSyncEvent({
   refreshFolders,
   refreshMessages,
   refreshSyncState,
-  refreshAudits,
-  refreshPendingActions
+  refreshAudits
 }: RefreshAfterMailSyncEventRequest) {
   if (!selectedAccountId || payload.account_id !== selectedAccountId) {
     return false;
@@ -298,8 +370,7 @@ export async function refreshAfterMailSyncEvent({
     refreshFolders(payload.account_id),
     refreshMessages(payload.account_id, selectedFolderId, query),
     refreshSyncState(payload.account_id),
-    refreshAudits(),
-    refreshPendingActions(payload.account_id)
+    refreshAudits()
   ]);
   return true;
 }
@@ -315,7 +386,6 @@ type AutomaticAccountSyncRequest = {
   refreshMessages: (accountId: string, folderId: string | null, query: string) => Promise<void>;
   refreshSyncState: (accountId: string) => Promise<void>;
   refreshAudits: () => Promise<void>;
-  refreshPendingActions: (accountId: string) => Promise<void>;
 };
 
 export async function runAutomaticAccountSync({
@@ -328,8 +398,7 @@ export async function runAutomaticAccountSync({
   refreshFolders,
   refreshMessages,
   refreshSyncState,
-  refreshAudits,
-  refreshPendingActions
+  refreshAudits
 }: AutomaticAccountSyncRequest) {
   if (!selectedAccountId || !syncEnabled) {
     return { refreshed: false, status: null };
@@ -343,8 +412,7 @@ export async function runAutomaticAccountSync({
     refreshFolders(selectedAccountId),
     refreshMessages(selectedAccountId, selectedFolderId, query),
     refreshSyncState(selectedAccountId),
-    refreshAudits(),
-    refreshPendingActions(selectedAccountId)
+    refreshAudits()
   ]);
   return {
     refreshed: true,
@@ -362,7 +430,6 @@ type ManualAccountSyncRequest = {
   refreshMessages: (accountId: string, folderId: string | null, query: string) => Promise<void>;
   refreshSyncState: (accountId: string) => Promise<void>;
   refreshAudits: () => Promise<void>;
-  refreshPendingActions: (accountId: string) => Promise<void>;
 };
 
 export async function runManualAccountSync({
@@ -374,8 +441,7 @@ export async function runManualAccountSync({
   refreshFolders,
   refreshMessages,
   refreshSyncState,
-  refreshAudits,
-  refreshPendingActions
+  refreshAudits
 }: ManualAccountSyncRequest) {
   const summary = await syncAccount(accountId);
   if (startAccountWatchers) {
@@ -385,8 +451,7 @@ export async function runManualAccountSync({
     refreshFolders(accountId),
     refreshMessages(accountId, folderId, query),
     refreshSyncState(accountId),
-    refreshAudits(),
-    refreshPendingActions(accountId)
+    refreshAudits()
   ]);
   return `sync complete: ${summary.folders} folders / ${summary.messages} messages`;
 }
@@ -401,7 +466,6 @@ export function App() {
   const [selectedMessage, setSelectedMessage] = useState<MailMessage | null>(null);
   const [syncStates, setSyncStates] = useState<SyncState[]>([]);
   const [audits, setAudits] = useState<MailActionAudit[]>([]);
-  const [pendingActions, setPendingActions] = useState<PendingMailAction[]>([]);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("backend link idle");
   const [isConfigOpen, setConfigOpen] = useState(false);
@@ -506,10 +570,6 @@ export function App() {
     setSyncStates(await api.getSyncStatus(accountId));
   }, []);
 
-  const refreshPendingActions = useCallback(async (accountId: string | null) => {
-    setPendingActions(await api.listPendingActions(accountId));
-  }, []);
-
   const refreshAiSettings = useCallback(async () => {
     setAiSettings(await api.getAiSettings());
   }, []);
@@ -528,9 +588,9 @@ export function App() {
 
   useEffect(() => {
     if (!selectedAccountId) return;
-    void Promise.all([refreshFolders(selectedAccountId), refreshSyncState(selectedAccountId), refreshPendingActions(selectedAccountId)])
+    void Promise.all([refreshFolders(selectedAccountId), refreshSyncState(selectedAccountId)])
       .catch((error) => setStatus(`folder load failed: ${String(error)}`));
-  }, [refreshFolders, refreshPendingActions, refreshSyncState, selectedAccountId]);
+  }, [refreshFolders, refreshSyncState, selectedAccountId]);
 
   useEffect(() => {
     if (!selectedAccountId) return;
@@ -576,8 +636,7 @@ export function App() {
         refreshFolders,
         refreshMessages,
         refreshSyncState,
-        refreshAudits,
-        refreshPendingActions
+        refreshAudits
       })
         .then((didRefresh) => {
           if (didRefresh) setStatus(`mail sync updated: ${event.payload.reason}`);
@@ -597,7 +656,7 @@ export function App() {
       isCancelled = true;
       unlisten?.();
     };
-  }, [refreshAudits, refreshFolders, refreshMessages, refreshPendingActions, refreshSyncState]);
+  }, [refreshAudits, refreshFolders, refreshMessages, refreshSyncState]);
 
   useEffect(() => {
     const runAutoSync = () => {
@@ -613,8 +672,7 @@ export function App() {
         refreshFolders,
         refreshMessages,
         refreshSyncState,
-        refreshAudits,
-        refreshPendingActions
+        refreshAudits
       })
         .then((result) => {
           if (result.status) setStatus(result.status);
@@ -627,7 +685,7 @@ export function App() {
 
     const intervalId = window.setInterval(runAutoSync, AUTO_SYNC_INTERVAL_MS);
     return () => window.clearInterval(intervalId);
-  }, [refreshAudits, refreshFolders, refreshMessages, refreshPendingActions, refreshSyncState]);
+  }, [refreshAudits, refreshFolders, refreshMessages, refreshSyncState]);
 
   useEffect(() => {
     setSelectedMessage(null);
@@ -682,8 +740,7 @@ export function App() {
           refreshFolders,
           refreshMessages,
           refreshSyncState,
-          refreshAudits,
-          refreshPendingActions
+          refreshAudits
         })
       );
     } catch (error) {
@@ -699,7 +756,7 @@ export function App() {
       setActionRunning(true);
       setStatus(`action running: ${actionLabels[action]}`);
       try {
-        const result = await api.executeMailAction({
+        await api.executeMailAction({
           action,
           account_id: selectedAccountId,
           message_ids: [selectedMessageId],
@@ -708,8 +765,7 @@ export function App() {
         await refreshFolders(selectedAccountId);
         await refreshMessages(selectedAccountId, selectedFolderId, query);
         await refreshAudits();
-        await refreshPendingActions(selectedAccountId);
-        setStatus(result.kind === "pending" ? `action queued: ${actionLabels[action]}` : `action executed: ${actionLabels[action]}`);
+        setStatus(`action executed: ${actionLabels[action]}`);
       } catch (error) {
         setStatus(`action failed: ${actionLabels[action]} / ${String(error)}`);
       } finally {
@@ -723,7 +779,6 @@ export function App() {
       refreshAudits,
       refreshFolders,
       refreshMessages,
-      refreshPendingActions,
       selectedAccountId,
       selectedFolderId,
       selectedMessageId
@@ -750,23 +805,31 @@ export function App() {
         refreshFolders,
         refreshMessages,
         refreshSyncState,
-        refreshAudits,
-        refreshPendingActions
+        refreshAudits
       });
       setStatus(nextStatus);
     },
-    [query, refreshAudits, refreshFolders, refreshMessages, refreshPendingActions, refreshSyncState]
+    [query, refreshAudits, refreshFolders, refreshMessages, refreshSyncState]
   );
 
   const handleSent = useCallback(
     async (draft: SendMessageDraft) => {
-      await api.sendMessage(draft);
-      await refreshAudits();
-      await refreshPendingActions(draft.account_id);
+      const result = await runDirectSendFlow({
+        draft,
+        selectedFolderId,
+        query,
+        sendMessage: api.sendMessage,
+        refreshFolders,
+        refreshMessages,
+        refreshAudits
+      });
+      setStatus(result.status);
+      if (!result.ok) {
+        throw result.error;
+      }
       setComposerOpen(false);
-      setStatus(formatSendQueuedStatus(draft.to));
     },
-    [refreshAudits, refreshPendingActions]
+    [query, refreshAudits, refreshFolders, refreshMessages, selectedFolderId]
   );
 
   const handleAnalyze = useCallback(async () => {
@@ -787,48 +850,6 @@ export function App() {
       setAnalyzing(false);
     }
   }, [isActionRunning, selectedMessageId]);
-
-  const handleConfirmPending = useCallback(
-    async (actionId: string) => {
-      if (!selectedAccountId || isActionRunning || isAnalyzing) return;
-      setActionRunning(true);
-      try {
-        await api.confirmAction(actionId);
-        await refreshFolders(selectedAccountId);
-        await refreshMessages(selectedAccountId, selectedFolderId, query);
-        await refreshAudits();
-        await refreshPendingActions(selectedAccountId);
-        setStatus(`pending action confirmed`);
-      } catch (error) {
-        await refreshAudits();
-        await refreshPendingActions(selectedAccountId);
-        setStatus(`confirm failed: ${String(error)}`);
-      } finally {
-        setActionRunning(false);
-      }
-    },
-    [isActionRunning, isAnalyzing, query, refreshAudits, refreshFolders, refreshMessages, refreshPendingActions, selectedAccountId, selectedFolderId]
-  );
-
-  const handleRejectPending = useCallback(
-    async (actionId: string) => {
-      if (!selectedAccountId || isActionRunning || isAnalyzing) return;
-      setActionRunning(true);
-      try {
-        await api.rejectAction(actionId);
-        await refreshAudits();
-        await refreshPendingActions(selectedAccountId);
-        setStatus(`pending action rejected`);
-      } catch (error) {
-        await refreshAudits();
-        await refreshPendingActions(selectedAccountId);
-        setStatus(`reject failed: ${String(error)}`);
-      } finally {
-        setActionRunning(false);
-      }
-    },
-    [isActionRunning, isAnalyzing, refreshAudits, refreshPendingActions, selectedAccountId]
-  );
 
   const measureWorkspaceAvailableWidth = useCallback(() => {
     const workspace = mailWorkspaceRef.current;
@@ -936,7 +957,7 @@ export function App() {
   )} percent`;
 
   return (
-    <main className="app-shell">
+    <main className={getAppShellClassName(false)}>
       <section className="topbar">
         <div className="brand-block" aria-label="AgentMail">
           <TerminalSquare size={21} />
@@ -1150,12 +1171,6 @@ export function App() {
             TEST / SYNC ACCOUNT
           </button>
         </section>
-        <PendingActionQueue
-          actions={pendingActions}
-          isActionRunning={isActionRunning || isAnalyzing}
-          onConfirm={handleConfirmPending}
-          onReject={handleRejectPending}
-        />
         <section className="console-panel audit-feed">
           <header>AUDIT / ACTIVITY LOG</header>
           <p>{accountSyncState?.error_message ?? status}</p>
@@ -1574,36 +1589,6 @@ function ConfigurationModal({
         )}
       </section>
     </div>
-  );
-}
-
-interface PendingActionQueueProps {
-  actions: PendingMailAction[];
-  isActionRunning: boolean;
-  onConfirm: (actionId: string) => Promise<void>;
-  onReject: (actionId: string) => Promise<void>;
-}
-
-function PendingActionQueue({ actions, isActionRunning, onConfirm, onReject }: PendingActionQueueProps) {
-  return (
-    <section className="console-panel pending-feed">
-      <header>PENDING ACTIONS</header>
-      {actions.length === 0 ? <p>queue empty</p> : null}
-      {actions.slice(0, 3).map((action) => (
-        <div className="pending-action-row" key={action.id}>
-          <code>{actionLabels[action.action] ?? action.action}</code>
-          <span>{action.draft?.subject ?? `${action.message_ids.length} MSG`}</span>
-          <div>
-            <button type="button" onClick={() => onConfirm(action.id)} disabled={isActionRunning} title="Confirm action">
-              <CheckCheck size={13} />
-            </button>
-            <button type="button" onClick={() => onReject(action.id)} disabled={isActionRunning} title="Reject action">
-              <X size={13} />
-            </button>
-          </div>
-        </div>
-      ))}
-    </section>
   );
 }
 

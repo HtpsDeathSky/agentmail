@@ -1,15 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  ACTIVITY_LOG_STORAGE_KEY,
   applyThemeModeToDocument,
   clampWorkspaceSplitPercent,
   formatAuditLine,
   formatFolderCount,
-  formatSendQueuedStatus,
+  formatSendStatus,
+  getAppShellClassName,
   getWorkspaceSplitModel,
   getNextThemeMode,
+  readStoredActivityLogVisibility,
   readStoredWorkspaceSplitPercent,
   readStoredThemeMode,
   refreshAfterMailSyncEvent,
+  runDirectSendFlow,
   runAutomaticAccountSync,
   runInitialAccountSync,
   runManualAccountSync,
@@ -27,11 +31,56 @@ describe("formatFolderCount", () => {
   });
 });
 
-describe("formatSendQueuedStatus", () => {
-  it("states that queued sends need pending action confirmation", () => {
-    expect(formatSendQueuedStatus(["ops@example.com"])).toBe(
-      "send queued for ops@example.com / confirm SEND in PENDING ACTIONS"
-    );
+describe("formatSendStatus", () => {
+  it("states that sends execute directly", () => {
+    expect(formatSendStatus(["ops@example.com"])).toBe("sent to ops@example.com");
+  });
+});
+
+describe("runDirectSendFlow", () => {
+  const draft = {
+    account_id: "acct-1",
+    to: ["ops@example.com"],
+    cc: [],
+    subject: "Deploy status",
+    body: "Ship it"
+  };
+
+  it("reports a sent status when post-send refresh fails", async () => {
+    const result = await runDirectSendFlow({
+      draft,
+      selectedFolderId: "acct-1:sent",
+      query: "release",
+      sendMessage: vi.fn().mockResolvedValue("sent-id"),
+      refreshFolders: vi.fn().mockRejectedValue(new Error("folder index unavailable")),
+      refreshMessages: vi.fn().mockResolvedValue(undefined),
+      refreshAudits: vi.fn().mockResolvedValue(undefined)
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      status: "sent to ops@example.com / refresh failed: Error: folder index unavailable"
+    });
+  });
+
+  it("preserves the original send error when audit refresh also fails", async () => {
+    const sendError = new Error("SMTP authentication rejected");
+
+    const result = await runDirectSendFlow({
+      draft,
+      selectedFolderId: "acct-1:sent",
+      query: "",
+      sendMessage: vi.fn().mockRejectedValue(sendError),
+      refreshFolders: vi.fn().mockResolvedValue(undefined),
+      refreshMessages: vi.fn().mockResolvedValue(undefined),
+      refreshAudits: vi.fn().mockRejectedValue(new Error("audit database locked"))
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: "send failed: Error: SMTP authentication rejected",
+      error: sendError
+    });
   });
 });
 
@@ -70,6 +119,25 @@ describe("theme mode helpers", () => {
 
     expect(window.localStorage.getItem(THEME_MODE_STORAGE_KEY)).toBe("light");
     expect(document.documentElement.dataset.theme).toBe("light");
+  });
+});
+
+describe("activity log visibility helpers", () => {
+  it("defaults to hidden when no saved preference exists", () => {
+    window.localStorage.removeItem(ACTIVITY_LOG_STORAGE_KEY);
+
+    expect(readStoredActivityLogVisibility(window.localStorage)).toBe(false);
+  });
+
+  it("reads a saved visible preference", () => {
+    window.localStorage.setItem(ACTIVITY_LOG_STORAGE_KEY, "true");
+
+    expect(readStoredActivityLogVisibility(window.localStorage)).toBe(true);
+  });
+
+  it("keeps the footer class out of the default app shell", () => {
+    expect(getAppShellClassName(false)).toBe("app-shell");
+    expect(getAppShellClassName(true)).toBe("app-shell activity-log-visible");
   });
 });
 
@@ -144,7 +212,6 @@ describe("runInitialAccountSync", () => {
     const refreshMessages = vi.fn().mockResolvedValue(undefined);
     const refreshSyncState = vi.fn().mockResolvedValue(undefined);
     const refreshAudits = vi.fn().mockResolvedValue(undefined);
-    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
     const startAccountWatchers = vi.fn().mockResolvedValue(undefined);
 
     const status = await runInitialAccountSync({
@@ -162,15 +229,13 @@ describe("runInitialAccountSync", () => {
       refreshFolders,
       refreshMessages,
       refreshSyncState,
-      refreshAudits,
-      refreshPendingActions
+      refreshAudits
     });
 
     expect(refreshFolders).toHaveBeenCalledWith("acct-1");
     expect(refreshMessages).toHaveBeenCalledWith("acct-1", "previous-folder", "release");
     expect(refreshSyncState).toHaveBeenCalledWith("acct-1");
     expect(refreshAudits).toHaveBeenCalled();
-    expect(refreshPendingActions).toHaveBeenCalledWith("acct-1");
     expect(startAccountWatchers).toHaveBeenCalledWith("acct-1");
     expect(status).toBe("account saved and initial sync complete: ops@example.com / 4 folders / 18 messages");
   });
@@ -180,7 +245,6 @@ describe("runInitialAccountSync", () => {
     const refreshMessages = vi.fn().mockResolvedValue(undefined);
     const refreshSyncState = vi.fn().mockResolvedValue(undefined);
     const refreshAudits = vi.fn().mockResolvedValue(undefined);
-    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
     const startAccountWatchers = vi.fn().mockRejectedValue(new Error("watch unavailable"));
 
     const status = await runInitialAccountSync({
@@ -198,8 +262,7 @@ describe("runInitialAccountSync", () => {
       refreshFolders,
       refreshMessages,
       refreshSyncState,
-      refreshAudits,
-      refreshPendingActions
+      refreshAudits
     });
 
     expect(startAccountWatchers).toHaveBeenCalledWith("acct-1");
@@ -211,7 +274,6 @@ describe("runInitialAccountSync", () => {
     const refreshMessages = vi.fn().mockResolvedValue(undefined);
     const refreshSyncState = vi.fn().mockResolvedValue(undefined);
     const refreshAudits = vi.fn().mockResolvedValue(undefined);
-    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
     const startAccountWatchers = vi.fn().mockResolvedValue(undefined);
 
     const status = await runInitialAccountSync({
@@ -224,15 +286,13 @@ describe("runInitialAccountSync", () => {
       refreshFolders,
       refreshMessages,
       refreshSyncState,
-      refreshAudits,
-      refreshPendingActions
+      refreshAudits
     });
 
     expect(refreshFolders).toHaveBeenCalledWith("acct-1");
     expect(refreshMessages).toHaveBeenCalledWith("acct-1", null, "");
     expect(refreshSyncState).toHaveBeenCalledWith("acct-1");
     expect(refreshAudits).toHaveBeenCalled();
-    expect(refreshPendingActions).toHaveBeenCalledWith("acct-1");
     expect(startAccountWatchers).not.toHaveBeenCalled();
     expect(status).toBe("account saved, but initial sync failed: Error: IMAP login rejected");
   });
@@ -249,7 +309,6 @@ describe("runInitialAccountSync", () => {
     const refreshMessages = vi.fn().mockResolvedValue(undefined);
     const refreshSyncState = vi.fn().mockResolvedValue(undefined);
     const refreshAudits = vi.fn().mockResolvedValue(undefined);
-    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
 
     const status = await runInitialAccountSync({
       accountId: "acct-1",
@@ -262,8 +321,7 @@ describe("runInitialAccountSync", () => {
       refreshFolders,
       refreshMessages,
       refreshSyncState,
-      refreshAudits,
-      refreshPendingActions
+      refreshAudits
     });
 
     expect(syncAccount).not.toHaveBeenCalled();
@@ -272,7 +330,6 @@ describe("runInitialAccountSync", () => {
     expect(refreshMessages).toHaveBeenCalledWith("acct-1", null, "");
     expect(refreshSyncState).toHaveBeenCalledWith("acct-1");
     expect(refreshAudits).toHaveBeenCalled();
-    expect(refreshPendingActions).toHaveBeenCalledWith("acct-1");
     expect(status).toBe("account configuration saved: ops@example.com");
   });
 });
@@ -283,7 +340,6 @@ describe("refreshAfterMailSyncEvent", () => {
     const refreshMessages = vi.fn().mockResolvedValue(undefined);
     const refreshSyncState = vi.fn().mockResolvedValue(undefined);
     const refreshAudits = vi.fn().mockResolvedValue(undefined);
-    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
 
     const didRefresh = await refreshAfterMailSyncEvent({
       payload: { account_id: "acct-1", folder_id: "acct-1:inbox", reason: "watch_changed" },
@@ -293,8 +349,7 @@ describe("refreshAfterMailSyncEvent", () => {
       refreshFolders,
       refreshMessages,
       refreshSyncState,
-      refreshAudits,
-      refreshPendingActions
+      refreshAudits
     });
 
     expect(didRefresh).toBe(true);
@@ -302,7 +357,6 @@ describe("refreshAfterMailSyncEvent", () => {
     expect(refreshMessages).toHaveBeenCalledWith("acct-1", "acct-1:inbox", "");
     expect(refreshSyncState).toHaveBeenCalledWith("acct-1");
     expect(refreshAudits).toHaveBeenCalled();
-    expect(refreshPendingActions).toHaveBeenCalledWith("acct-1");
   });
 
   it("ignores watcher sync events for a different selected account", async () => {
@@ -310,7 +364,6 @@ describe("refreshAfterMailSyncEvent", () => {
     const refreshMessages = vi.fn().mockResolvedValue(undefined);
     const refreshSyncState = vi.fn().mockResolvedValue(undefined);
     const refreshAudits = vi.fn().mockResolvedValue(undefined);
-    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
 
     const didRefresh = await refreshAfterMailSyncEvent({
       payload: { account_id: "acct-2", folder_id: "acct-2:inbox", reason: "watch_changed" },
@@ -320,8 +373,7 @@ describe("refreshAfterMailSyncEvent", () => {
       refreshFolders,
       refreshMessages,
       refreshSyncState,
-      refreshAudits,
-      refreshPendingActions
+      refreshAudits
     });
 
     expect(didRefresh).toBe(false);
@@ -329,7 +381,6 @@ describe("refreshAfterMailSyncEvent", () => {
     expect(refreshMessages).not.toHaveBeenCalled();
     expect(refreshSyncState).not.toHaveBeenCalled();
     expect(refreshAudits).not.toHaveBeenCalled();
-    expect(refreshPendingActions).not.toHaveBeenCalled();
   });
 });
 
@@ -346,7 +397,6 @@ describe("runAutomaticAccountSync", () => {
     const refreshMessages = vi.fn().mockResolvedValue(undefined);
     const refreshSyncState = vi.fn().mockResolvedValue(undefined);
     const refreshAudits = vi.fn().mockResolvedValue(undefined);
-    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
 
     const result = await runAutomaticAccountSync({
       selectedAccountId: "acct-1",
@@ -357,8 +407,7 @@ describe("runAutomaticAccountSync", () => {
       refreshFolders,
       refreshMessages,
       refreshSyncState,
-      refreshAudits,
-      refreshPendingActions
+      refreshAudits
     });
 
     expect(result).toEqual({ refreshed: true, status: "auto sync complete: 4 folders / 19 messages" });
@@ -368,7 +417,6 @@ describe("runAutomaticAccountSync", () => {
     expect(refreshMessages).toHaveBeenCalledWith("acct-1", "acct-1:inbox", "");
     expect(refreshSyncState).toHaveBeenCalledWith("acct-1");
     expect(refreshAudits).toHaveBeenCalled();
-    expect(refreshPendingActions).toHaveBeenCalledWith("acct-1");
   });
 
   it("does nothing when no account is selected", async () => {
@@ -382,7 +430,6 @@ describe("runAutomaticAccountSync", () => {
     const refreshMessages = vi.fn().mockResolvedValue(undefined);
     const refreshSyncState = vi.fn().mockResolvedValue(undefined);
     const refreshAudits = vi.fn().mockResolvedValue(undefined);
-    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
 
     const result = await runAutomaticAccountSync({
       selectedAccountId: null,
@@ -392,8 +439,7 @@ describe("runAutomaticAccountSync", () => {
       refreshFolders,
       refreshMessages,
       refreshSyncState,
-      refreshAudits,
-      refreshPendingActions
+      refreshAudits
     });
 
     expect(result).toEqual({ refreshed: false, status: null });
@@ -402,7 +448,6 @@ describe("runAutomaticAccountSync", () => {
     expect(refreshMessages).not.toHaveBeenCalled();
     expect(refreshSyncState).not.toHaveBeenCalled();
     expect(refreshAudits).not.toHaveBeenCalled();
-    expect(refreshPendingActions).not.toHaveBeenCalled();
   });
 });
 
@@ -419,7 +464,6 @@ describe("runManualAccountSync", () => {
     const refreshMessages = vi.fn().mockResolvedValue(undefined);
     const refreshSyncState = vi.fn().mockResolvedValue(undefined);
     const refreshAudits = vi.fn().mockResolvedValue(undefined);
-    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
 
     const status = await runManualAccountSync({
       accountId: "acct-1",
@@ -430,8 +474,7 @@ describe("runManualAccountSync", () => {
       refreshFolders,
       refreshMessages,
       refreshSyncState,
-      refreshAudits,
-      refreshPendingActions
+      refreshAudits
     });
 
     expect(status).toBe("sync complete: 4 folders / 11 messages");
@@ -441,6 +484,5 @@ describe("runManualAccountSync", () => {
     expect(refreshMessages).toHaveBeenCalledWith("acct-1", "acct-1:inbox", "");
     expect(refreshSyncState).toHaveBeenCalledWith("acct-1");
     expect(refreshAudits).toHaveBeenCalled();
-    expect(refreshPendingActions).toHaveBeenCalledWith("acct-1");
   });
 });
