@@ -305,9 +305,10 @@ impl AppApi {
                     .unwrap_or(0),
             })?;
 
+            let previous_last_uid = previous_state.and_then(|state| state.last_uid);
             let fetch_request = MessageFetchRequest {
-                last_uid: previous_state.and_then(|state| state.last_uid),
-                limit: 100,
+                last_uid: None,
+                limit: u32::MAX,
             };
             let messages_result = self
                 .protocol
@@ -326,7 +327,7 @@ impl AppApi {
                         account_id: account.id.clone(),
                         folder_id: Some(folder.id.clone()),
                         state: SyncStateKind::Backoff,
-                        last_uid: fetch_request.last_uid,
+                        last_uid: previous_last_uid,
                         last_synced_at: None,
                         error_message: Some(err.to_string()),
                         backoff_until: Some(now_plus_seconds_rfc3339(backoff_seconds(
@@ -340,12 +341,18 @@ impl AppApi {
                     continue;
                 }
             };
-            let mut folder_last_uid = fetch_request.last_uid.clone();
+            let mut folder_last_uid = None;
+            let mut remote_uids = HashSet::new();
             for message in messages {
                 folder_last_uid = message.uid.clone().or(folder_last_uid);
+                if let Some(uid) = message.uid.as_ref() {
+                    remote_uids.insert(uid.clone());
+                }
                 self.store.upsert_message(&message)?;
                 message_count += 1;
             }
+            self.store
+                .reconcile_folder_remote_uids(&account.id, &folder.id, &remote_uids)?;
             self.store.refresh_folder_counts(&folder.id)?;
             last_uid = folder_last_uid.clone().or(last_uid);
             successful_folders += 1;
@@ -2107,6 +2114,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn account_sync_uses_full_folder_snapshot_after_initial_sync() {
+        let protocol = SnapshotSyncProtocol::new(vec!["42"]);
+        let requests = Arc::clone(&protocol.requests);
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+
+        api.sync_account(account.id.clone()).await.unwrap();
+        api.sync_account(account.id.clone()).await.unwrap();
+
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| request.last_uid.is_none()));
+
+        let inbox = api
+            .store
+            .find_folder_by_role(&account.id, FolderRole::Inbox)
+            .unwrap()
+            .unwrap();
+        let messages = api
+            .list_messages(MessageQuery {
+                account_id: Some(account.id),
+                folder_id: Some(inbox.id),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].uid.as_deref(), Some("42"));
+    }
+
+    #[tokio::test]
+    async fn account_sync_removes_uid_messages_absent_from_remote_snapshot() {
+        let protocol = SnapshotSyncProtocol::new(vec!["42"]);
+        let inbox_uids = Arc::clone(&protocol.inbox_uids);
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+
+        api.sync_account(account.id.clone()).await.unwrap();
+        let message = first_message(&api, &account.id);
+        *inbox_uids.lock() = Vec::new();
+
+        api.sync_account(account.id.clone()).await.unwrap();
+
+        assert!(api
+            .store
+            .get_message(&message.id)
+            .unwrap()
+            .deleted_at
+            .is_some());
+        let inbox = api
+            .store
+            .find_folder_by_role(&account.id, FolderRole::Inbox)
+            .unwrap()
+            .unwrap();
+        let messages = api
+            .list_messages(MessageQuery {
+                account_id: Some(account.id),
+                folder_id: Some(inbox.id.clone()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+        assert!(messages.is_empty());
+        assert_eq!(api.store.get_folder(&inbox.id).unwrap().total_count, 0);
+    }
+
+    #[tokio::test]
     async fn low_risk_action_calls_protocol_then_updates_local_state() {
         let protocol = RecordingProtocol::default();
         let actions = Arc::clone(&protocol.actions);
@@ -3054,6 +3128,22 @@ mod tests {
         test_calls: Arc<Mutex<Vec<ConnectionSettings>>>,
     }
 
+    struct SnapshotSyncProtocol {
+        inbox_uids: Arc<Mutex<Vec<String>>>,
+        requests: Arc<Mutex<Vec<MessageFetchRequest>>>,
+    }
+
+    impl SnapshotSyncProtocol {
+        fn new(uids: Vec<&str>) -> Self {
+            Self {
+                inbox_uids: Arc::new(Mutex::new(
+                    uids.into_iter().map(ToString::to_string).collect(),
+                )),
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
     #[async_trait]
     impl MailProtocol for CountingConnectionProtocol {
         async fn test_connection(
@@ -3084,6 +3174,97 @@ mod tests {
             _request: &MessageFetchRequest,
         ) -> ProtocolResult<Vec<MailMessage>> {
             Ok(Vec::new())
+        }
+
+        async fn send_message(
+            &self,
+            _settings: &ConnectionSettings,
+            _draft: &SendMessageDraft,
+        ) -> ProtocolResult<String> {
+            Ok(new_id())
+        }
+
+        async fn apply_action(
+            &self,
+            _settings: &ConnectionSettings,
+            _account: &MailAccount,
+            _action: &RemoteMailAction,
+        ) -> ProtocolResult<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl MailProtocol for SnapshotSyncProtocol {
+        async fn test_connection(
+            &self,
+            _settings: &ConnectionSettings,
+        ) -> ProtocolResult<ConnectionTestResult> {
+            Ok(ConnectionTestResult {
+                imap_ok: true,
+                smtp_ok: true,
+                message: "ok".to_string(),
+            })
+        }
+
+        async fn fetch_folders(
+            &self,
+            _settings: &ConnectionSettings,
+            account: &MailAccount,
+        ) -> ProtocolResult<Vec<MailFolder>> {
+            Ok(vec![MailFolder {
+                id: format!("{}:inbox", account.id),
+                account_id: account.id.clone(),
+                name: "INBOX".to_string(),
+                path: "INBOX".to_string(),
+                role: FolderRole::Inbox,
+                unread_count: 0,
+                total_count: 0,
+            }])
+        }
+
+        async fn fetch_messages(
+            &self,
+            _settings: &ConnectionSettings,
+            account: &MailAccount,
+            folder: &MailFolder,
+            request: &MessageFetchRequest,
+        ) -> ProtocolResult<Vec<MailMessage>> {
+            self.requests.lock().push(request.clone());
+            let min_uid = request
+                .last_uid
+                .as_deref()
+                .and_then(|uid| uid.parse::<u32>().ok())
+                .unwrap_or(0);
+            Ok(self
+                .inbox_uids
+                .lock()
+                .iter()
+                .filter(|uid| uid.parse::<u32>().map(|uid| uid > min_uid).unwrap_or(true))
+                .map(|uid| MailMessage {
+                    id: format!("{}:{}:{uid}", account.id, folder.id),
+                    account_id: account.id.clone(),
+                    folder_id: folder.id.clone(),
+                    uid: Some(uid.clone()),
+                    message_id_header: Some(format!("<snapshot-{uid}@example.com>")),
+                    subject: format!("Snapshot {uid}"),
+                    sender: "sec@example.com".to_string(),
+                    recipients: vec![account.email.clone()],
+                    cc: Vec::new(),
+                    received_at: now_rfc3339(),
+                    body_preview: format!("snapshot body {uid}"),
+                    body: Some(format!("snapshot body {uid}")),
+                    attachments: Vec::new(),
+                    flags: mail_core::MessageFlags {
+                        is_read: false,
+                        is_starred: false,
+                        is_answered: false,
+                        is_forwarded: false,
+                    },
+                    size_bytes: Some(128),
+                    deleted_at: None,
+                })
+                .collect())
         }
 
         async fn send_message(

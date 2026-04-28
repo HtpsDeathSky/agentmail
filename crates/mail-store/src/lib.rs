@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -672,6 +673,50 @@ impl MailStore {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn reconcile_folder_remote_uids(
+        &self,
+        account_id: &str,
+        folder_id: &str,
+        remote_uids: &HashSet<String>,
+    ) -> StoreResult<usize> {
+        let deleted_at = now_rfc3339();
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let stale_ids = {
+            let mut stmt = tx.prepare(
+                r#"
+                SELECT id, uid
+                FROM messages
+                WHERE account_id = ?1
+                  AND folder_id = ?2
+                  AND uid IS NOT NULL
+                  AND deleted_at IS NULL
+                "#,
+            )?;
+            let rows = stmt.query_map(params![account_id, folder_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut stale_ids = Vec::new();
+            for row in rows {
+                let (id, uid) = row?;
+                if !remote_uids.contains(&uid) {
+                    stale_ids.push(id);
+                }
+            }
+            stale_ids
+        };
+
+        for id in &stale_ids {
+            tx.execute(
+                "UPDATE messages SET deleted_at = ?1 WHERE id = ?2",
+                params![deleted_at, id],
+            )?;
+            tx.execute("DELETE FROM message_fts WHERE message_id = ?1", params![id])?;
+        }
+        tx.commit()?;
+        Ok(stale_ids.len())
     }
 
     pub fn move_uidless_messages_to_folder(
