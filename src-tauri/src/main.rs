@@ -1,13 +1,11 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use std::{
-    collections::HashSet,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+mod watchers;
+
+use std::sync::Arc;
 
 use app_api::{
-    AccountConfigView, AddAccountRequest, ApiError, AppApi, SaveAccountConfigRequest, SyncSummary,
+    AccountConfigView, AddAccountRequest, AppApi, SaveAccountConfigRequest, SyncSummary,
     TestConnectionRequest,
 };
 use mail_core::{
@@ -15,27 +13,13 @@ use mail_core::{
     MailActionRequest, MailActionResult, MailFolder, MailMessage, MessageQuery, PendingMailAction,
     SaveAiSettingsRequest, SendMessageDraft, SendMessageResult, SyncState,
 };
-use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
-
-const MAIL_SYNC_EVENT: &str = "agentmail-mail-sync";
-const WATCHER_RETRY_DELAY: Duration = Duration::from_secs(30);
+use tauri::{AppHandle, Manager, State};
+use watchers::{
+    emit_mail_sync_event, start_account_watchers_for_api, MailSyncEventPayload, WatcherRegistry,
+};
 
 struct ApiState {
     api: Arc<AppApi>,
-}
-
-#[derive(Clone, Default)]
-struct WatcherRegistry {
-    active: Arc<Mutex<HashSet<String>>>,
-}
-
-#[derive(Clone, Serialize)]
-struct MailSyncEventPayload {
-    account_id: String,
-    folder_id: Option<String>,
-    reason: &'static str,
-    message: Option<String>,
 }
 
 #[tauri::command]
@@ -230,129 +214,6 @@ fn list_ai_insights(
 
 fn to_error(error: impl std::fmt::Display) -> String {
     error.to_string()
-}
-
-fn watcher_key(account_id: &str, folder_id: &str) -> String {
-    format!("{account_id}\0{folder_id}")
-}
-
-fn register_watcher(registry: &WatcherRegistry, account_id: &str, folder_id: &str) -> bool {
-    let key = watcher_key(account_id, folder_id);
-    match registry.active.lock() {
-        Ok(mut active) => active.insert(key),
-        Err(_) => false,
-    }
-}
-
-fn remove_watcher(registry: &WatcherRegistry, account_id: &str, folder_id: &str) {
-    let key = watcher_key(account_id, folder_id);
-    if let Ok(mut active) = registry.active.lock() {
-        active.remove(&key);
-    }
-}
-
-fn start_account_watchers_for_api(
-    api: Arc<AppApi>,
-    registry: WatcherRegistry,
-    app: AppHandle,
-    account_id: String,
-) -> Result<(), String> {
-    if !api.is_account_sync_enabled(&account_id).map_err(to_error)? {
-        return Ok(());
-    }
-
-    let folders = api.list_folders(account_id.clone()).map_err(to_error)?;
-    for folder in folders {
-        start_folder_watcher(
-            Arc::clone(&api),
-            registry.clone(),
-            app.clone(),
-            account_id.clone(),
-            folder.id,
-        );
-    }
-    Ok(())
-}
-
-fn start_folder_watcher(
-    api: Arc<AppApi>,
-    registry: WatcherRegistry,
-    app: AppHandle,
-    account_id: String,
-    folder_id: String,
-) {
-    if !register_watcher(&registry, &account_id, &folder_id) {
-        return;
-    }
-
-    tauri::async_runtime::spawn(async move {
-        loop {
-            match api.is_account_sync_enabled(&account_id) {
-                Ok(true) => {}
-                Ok(false) | Err(_) => {
-                    remove_watcher(&registry, &account_id, &folder_id);
-                    return;
-                }
-            }
-
-            match api
-                .watch_folder_until_change(account_id.clone(), folder_id.clone())
-                .await
-            {
-                Ok(mail_core::FolderWatchOutcome::Changed) => {
-                    match api.is_account_sync_enabled(&account_id) {
-                        Ok(true) => {}
-                        Ok(false) | Err(_) => {
-                            remove_watcher(&registry, &account_id, &folder_id);
-                            return;
-                        }
-                    }
-
-                    match api.sync_account(account_id.clone()).await {
-                        Ok(summary) => {
-                            emit_mail_sync_event(
-                                &app,
-                                MailSyncEventPayload {
-                                    account_id: summary.account_id,
-                                    folder_id: Some(folder_id.clone()),
-                                    reason: "watch_changed",
-                                    message: Some(format!(
-                                        "{} folders / {} messages",
-                                        summary.folders, summary.messages
-                                    )),
-                                },
-                            );
-                        }
-                        Err(ApiError::SyncAlreadyRunning(_)) => {}
-                        Err(_) => {
-                            tokio::time::sleep(WATCHER_RETRY_DELAY).await;
-                            continue;
-                        }
-                    }
-                    if start_account_watchers_for_api(
-                        Arc::clone(&api),
-                        registry.clone(),
-                        app.clone(),
-                        account_id.clone(),
-                    )
-                    .is_err()
-                    {
-                        tokio::time::sleep(WATCHER_RETRY_DELAY).await;
-                        continue;
-                    }
-                }
-                Ok(mail_core::FolderWatchOutcome::Timeout) => {}
-                Err(_) => {
-                    tokio::time::sleep(WATCHER_RETRY_DELAY).await;
-                    continue;
-                }
-            }
-        }
-    });
-}
-
-fn emit_mail_sync_event(app: &AppHandle, payload: MailSyncEventPayload) {
-    let _ = app.emit(MAIL_SYNC_EVENT, payload);
 }
 
 fn main() {
