@@ -788,6 +788,22 @@ impl MailStore {
         Ok(())
     }
 
+    pub fn save_direct_sent_message(
+        &self,
+        sent_folder: &MailFolder,
+        message: &MailMessage,
+        audit: &MailActionAudit,
+    ) -> StoreResult<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        save_folder_on_conn(&tx, sent_folder)?;
+        upsert_message_tx(&tx, message)?;
+        refresh_folder_counts_on_conn(&tx, &sent_folder.id)?;
+        write_audit_on_conn(&tx, audit)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get_pending_action(&self, id: &str) -> StoreResult<PendingMailAction> {
         let conn = self.conn.lock();
         conn.query_row(
@@ -2028,6 +2044,97 @@ mod tests {
             store.get_pending_action(&pending.id).unwrap().status,
             PendingActionStatus::Rejected
         );
+    }
+
+    #[test]
+    fn direct_sent_message_persists_message_counts_and_audit() {
+        let store = MailStore::memory().unwrap();
+        let now = now_rfc3339();
+        let account = MailAccount {
+            id: "acct".to_string(),
+            display_name: "Ops".to_string(),
+            email: "ops@example.com".to_string(),
+            imap_host: "imap.example.com".to_string(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_port: 465,
+            smtp_tls: true,
+            sync_enabled: true,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        store.save_account(&account).unwrap();
+
+        let sent = MailFolder {
+            id: "acct:sent".to_string(),
+            account_id: account.id.clone(),
+            name: "Sent".to_string(),
+            path: "Sent".to_string(),
+            role: FolderRole::Sent,
+            unread_count: 0,
+            total_count: 0,
+        };
+        let message = MailMessage {
+            id: "local-sent-1".to_string(),
+            account_id: account.id.clone(),
+            folder_id: sent.id.clone(),
+            uid: None,
+            message_id_header: Some("<local-sent-1@agentmail.local>".to_string()),
+            subject: "Direct sent".to_string(),
+            sender: account.email.clone(),
+            recipients: vec!["sec@example.com".to_string()],
+            cc: vec!["ops-lead@example.com".to_string()],
+            received_at: now.clone(),
+            body_preview: "Direct body".to_string(),
+            body: Some("Direct body".to_string()),
+            attachments: Vec::new(),
+            flags: MessageFlags {
+                is_read: true,
+                is_starred: false,
+                is_answered: true,
+                is_forwarded: false,
+            },
+            size_bytes: None,
+            deleted_at: None,
+        };
+        let audit = MailActionAudit {
+            id: "audit-1".to_string(),
+            account_id: account.id.clone(),
+            action: MailActionKind::Send,
+            message_ids: vec![message.id.clone()],
+            status: ActionAuditStatus::Executed,
+            error_message: None,
+            created_at: now,
+        };
+
+        store
+            .save_direct_sent_message(&sent, &message, &audit)
+            .unwrap();
+
+        let saved_sent = store.get_folder(&sent.id).unwrap();
+        assert_eq!(saved_sent.total_count, 1);
+        assert_eq!(saved_sent.unread_count, 0);
+
+        let messages = store
+            .list_messages(&MessageQuery {
+                account_id: Some(account.id.clone()),
+                folder_id: Some(sent.id.clone()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, message.id);
+        assert_eq!(
+            messages[0].message_id_header.as_deref(),
+            Some("<local-sent-1@agentmail.local>")
+        );
+
+        let audits = store.list_audits(5).unwrap();
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].status, ActionAuditStatus::Executed);
+        assert_eq!(audits[0].message_ids, vec!["local-sent-1".to_string()]);
     }
 
     #[test]
