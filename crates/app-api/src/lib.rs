@@ -662,17 +662,16 @@ impl AppApi {
             });
         }
         let mut warning = None;
-        if account.sync_enabled {
-            if self
+        if account.sync_enabled
+            && self
                 .reconcile_sent_placeholders_after_send(&account.id)
                 .await
                 .is_ok()
+        {
+            if let Err(err) =
+                self.cleanup_direct_sent_copy_after_reconcile(&account.id, &message_id)
             {
-                if let Err(err) =
-                    self.cleanup_direct_sent_copy_after_reconcile(&account.id, &message_id)
-                {
-                    warning = Some(format!("sent but local cleanup failed: {err}"));
-                }
+                warning = Some(format!("sent but local cleanup failed: {err}"));
             }
         }
         Ok(SendMessageResult {
@@ -2089,7 +2088,6 @@ mod tests {
     async fn watch_folder_changed_returns_changed_and_marks_folder_watching() {
         let protocol = WatchProtocol {
             outcome: Ok(mail_core::FolderWatchOutcome::Changed),
-            ..WatchProtocol::default()
         };
         let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
         let account = add_sample_account(&api).await;
@@ -2118,7 +2116,6 @@ mod tests {
     async fn watch_folder_error_enters_folder_backoff() {
         let protocol = WatchProtocol {
             outcome: Err(ProtocolError::Unsupported("idle unavailable".to_string())),
-            ..WatchProtocol::default()
         };
         let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
         let account = add_sample_account(&api).await;

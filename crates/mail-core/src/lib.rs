@@ -150,19 +150,6 @@ pub enum MailActionKind {
     BatchMove,
 }
 
-impl MailActionKind {
-    pub fn requires_confirmation(self) -> bool {
-        matches!(
-            self,
-            Self::PermanentDelete
-                | Self::Send
-                | Self::Forward
-                | Self::BatchDelete
-                | Self::BatchMove
-        )
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MailActionRequest {
     pub action: MailActionKind,
@@ -317,19 +304,14 @@ pub enum FolderWatchOutcome {
     Timeout,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AiPriority {
     Low,
+    #[default]
     Normal,
     High,
     Urgent,
-}
-
-impl Default for AiPriority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]

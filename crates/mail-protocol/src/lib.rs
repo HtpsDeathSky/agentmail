@@ -982,7 +982,7 @@ fn folder_id(account_id: &str, path: &str) -> String {
 }
 
 fn sanitize_error(value: &str) -> String {
-    value.replace('\r', " ").replace('\n', " ")
+    value.replace(['\r', '\n'], " ")
 }
 
 #[cfg(test)]

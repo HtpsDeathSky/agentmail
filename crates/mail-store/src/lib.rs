@@ -2395,15 +2395,13 @@ mod tests {
                     ))
                 })
                 .unwrap();
-            let has_cascade_message_fk =
-                rows.map(|row| row.unwrap())
-                    .any(|(table, from, to, on_delete)| {
-                        table == "messages"
-                            && from == "message_id"
-                            && to == "id"
-                            && on_delete.eq_ignore_ascii_case("CASCADE")
-                    });
-            has_cascade_message_fk
+            let rows = rows.map(|row| row.unwrap()).collect::<Vec<_>>();
+            rows.into_iter().any(|(table, from, to, on_delete)| {
+                table == "messages"
+                    && from == "message_id"
+                    && to == "id"
+                    && on_delete.eq_ignore_ascii_case("CASCADE")
+            })
         };
         assert!(has_cascade_message_fk);
 
