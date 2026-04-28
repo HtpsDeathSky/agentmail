@@ -105,27 +105,7 @@ fn start_folder_watcher(
                         }
                     }
 
-                    match api.sync_folder(account_id.clone(), folder_id.clone()).await {
-                        Ok(summary) => {
-                            emit_mail_sync_event(
-                                &app,
-                                MailSyncEventPayload {
-                                    account_id: summary.account_id,
-                                    folder_id: Some(folder_id.clone()),
-                                    reason: "watch_changed",
-                                    message: Some(format!(
-                                        "{} folders / {} messages",
-                                        summary.folders, summary.messages
-                                    )),
-                                },
-                            );
-                        }
-                        Err(ApiError::SyncAlreadyRunning(_)) => {}
-                        Err(_) => {
-                            tokio::time::sleep(WATCHER_RETRY_DELAY).await;
-                            continue;
-                        }
-                    }
+                    sync_folder_after_change(&api, &app, &account_id, &folder_id).await;
                 }
                 Ok(FolderWatchOutcome::Timeout) => {}
                 Err(_) => {
@@ -135,6 +115,48 @@ fn start_folder_watcher(
             }
         }
     });
+}
+
+async fn sync_folder_after_change(
+    api: &AppApi,
+    app: &AppHandle,
+    account_id: &str,
+    folder_id: &str,
+) {
+    loop {
+        match api.is_account_sync_enabled(account_id) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return,
+        }
+
+        match api
+            .sync_folder(account_id.to_string(), folder_id.to_string())
+            .await
+        {
+            Ok(summary) => {
+                emit_mail_sync_event(
+                    app,
+                    MailSyncEventPayload {
+                        account_id: summary.account_id,
+                        folder_id: Some(folder_id.to_string()),
+                        reason: "watch_changed",
+                        message: Some(format!(
+                            "{} folders / {} messages",
+                            summary.folders, summary.messages
+                        )),
+                    },
+                );
+                return;
+            }
+            Err(ApiError::SyncAlreadyRunning(_)) => {
+                tokio::time::sleep(WATCHER_RETRY_DELAY).await;
+            }
+            Err(_) => {
+                tokio::time::sleep(WATCHER_RETRY_DELAY).await;
+                return;
+            }
+        }
+    }
 }
 
 pub fn emit_mail_sync_event(app: &AppHandle, payload: MailSyncEventPayload) {
