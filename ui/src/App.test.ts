@@ -2,13 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import {
   clampWorkspaceSplitPercent,
   getAppShellClassName,
-  getWorkspaceSplitModel,
+  getWorkspaceSplitModel
+} from "./App";
+import {
   refreshAfterMailSyncEvent,
   runDirectSendFlow,
   runAutomaticAccountSync,
   runInitialAccountSync,
   runManualAccountSync
-} from "./App";
+} from "./lib/syncFlows";
 import {
   ACTIVITY_LOG_STORAGE_KEY,
   applyThemeModeToDocument,
