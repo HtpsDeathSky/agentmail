@@ -1,4 +1,4 @@
-import { MailActionKind } from "../api";
+import type { MailActionKind } from "../api";
 
 export const actionLabels: Record<MailActionKind, string> = {
   mark_read: "READ",

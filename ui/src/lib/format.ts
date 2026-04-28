@@ -1,4 +1,4 @@
-import { MailActionAudit, MailFolder } from "../api";
+import type { MailActionAudit, MailFolder } from "../api";
 import { actionLabels } from "./mailActions";
 
 export function formatFolderCount(folder: Pick<MailFolder, "unread_count" | "total_count">) {
