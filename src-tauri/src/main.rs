@@ -15,7 +15,8 @@ use mail_core::{
 };
 use tauri::{AppHandle, Manager, State};
 use watchers::{
-    emit_mail_sync_event, start_account_watchers_for_api, MailSyncEventPayload, WatcherRegistry,
+    emit_mail_sync_event, emit_watch_diagnostic, start_account_watchers_for_api,
+    MailSyncEventPayload, WatchDiagnosticEventPayload, WatcherRegistry,
 };
 
 struct ApiState {
@@ -253,12 +254,22 @@ fn main() {
                                     )),
                                 },
                             );
-                            let _ = start_account_watchers_for_api(
+                            if let Err(error) = start_account_watchers_for_api(
                                 Arc::clone(&api),
                                 watcher_registry.clone(),
                                 app_handle.clone(),
-                                account_id,
-                            );
+                                account_id.clone(),
+                            ) {
+                                emit_watch_diagnostic(
+                                    &app_handle,
+                                    WatchDiagnosticEventPayload {
+                                        account_id,
+                                        folder_id: None,
+                                        stage: "watch_start_failed",
+                                        message: Some(error),
+                                    },
+                                );
+                            }
                         }
                     }
                 }
