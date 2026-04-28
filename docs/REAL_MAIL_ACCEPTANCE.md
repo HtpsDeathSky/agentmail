@@ -25,6 +25,9 @@ Use a disposable or dedicated test mailbox. Do not run destructive checks on a p
 
 ## Sync Acceptance
 
+- QQ automatic sync is IMAP IDLE-driven for all selectable folders returned by the account's IMAP folder list.
+- Background automatic sync must not use a 30-second polling interval.
+- Manual sync remains available from the topbar, shows a waiting ring while active, and refreshes folders/messages/sync state/audits after completion.
 - The folder rail shows Inbox. Sent, Archive, Trash, Drafts, and provider-specific folders appear when returned as selectable IMAP folders.
 - Selecting each synced folder loads messages for that folder, not only Inbox.
 - Folder rows show synced local counts. Folders with unread mail may show `unread/total`; folders without unread mail should show the total count.
