@@ -70,6 +70,7 @@ import {
   runManualAccountSync,
   type MailSyncEventPayload
 } from "./lib/syncFlows";
+import { getManualSyncButtonState } from "./lib/syncUi";
 
 const defaultAccountConfigForm: SaveAccountConfigRequest = {
   id: null,
@@ -153,6 +154,7 @@ export function App() {
   const [aiInsights, setAiInsights] = useState<AiInsight[]>([]);
   const [isAnalyzing, setAnalyzing] = useState(false);
   const [isActionRunning, setActionRunning] = useState(false);
+  const [isManualSyncing, setManualSyncing] = useState(false);
   const [aiStatus, setAiStatus] = useState("ai link idle");
   const [themeMode, setThemeMode] = useState<ThemeMode>(() =>
     typeof window === "undefined" ? "dark" : readStoredThemeMode(window.localStorage)
@@ -383,8 +385,9 @@ export function App() {
   }, [selectedMessageId]);
 
   const handleSync = useCallback(async () => {
-    if (!selectedAccountId) return;
-    setStatus("syncing account");
+    if (!selectedAccountId || isManualSyncing) return;
+    setManualSyncing(true);
+    setStatus("sync running");
     try {
       setStatus(
         await runManualAccountSync({
@@ -403,8 +406,19 @@ export function App() {
       await refreshSyncState(selectedAccountId);
       await refreshAudits();
       setStatus(`sync failed: ${String(error)}`);
+    } finally {
+      setManualSyncing(false);
     }
-  }, [query, refreshAudits, refreshFolders, refreshMessages, refreshSyncState, selectedAccountId, selectedFolderId]);
+  }, [
+    isManualSyncing,
+    query,
+    refreshAudits,
+    refreshFolders,
+    refreshMessages,
+    refreshSyncState,
+    selectedAccountId,
+    selectedFolderId
+  ]);
 
   const runAction = useCallback(
     async (action: MailActionKind, targetFolderId?: string | null) => {
@@ -611,6 +625,7 @@ export function App() {
   const splitValueText = `Message list ${Math.round(workspaceSplitModel.percent)} percent, detail ${Math.round(
     100 - workspaceSplitModel.percent
   )} percent`;
+  const manualSyncButton = getManualSyncButtonState(selectedAccountId, isManualSyncing);
 
   return (
     <main className={getAppShellClassName(showActivityLog)}>
@@ -628,7 +643,13 @@ export function App() {
           {isPending ? <span className="pending-dot">INDEX</span> : null}
         </div>
         <div className="top-actions">
-          <button className="icon-button" type="button" onClick={handleSync} disabled={!selectedAccountId} title="Sync account">
+          <button
+            className={manualSyncButton.className}
+            type="button"
+            onClick={handleSync}
+            disabled={manualSyncButton.disabled}
+            title={manualSyncButton.title}
+          >
             <RefreshCcw size={17} />
           </button>
           <button className="icon-button" type="button" onClick={() => setComposerOpen(true)} disabled={!selectedAccountId} title="Compose">

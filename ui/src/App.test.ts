@@ -10,6 +10,7 @@ import {
   runInitialAccountSync,
   runManualAccountSync
 } from "./lib/syncFlows";
+import { getManualSyncButtonState } from "./lib/syncUi";
 import {
   ACTIVITY_LOG_STORAGE_KEY,
   applyThemeModeToDocument,
@@ -36,6 +37,24 @@ describe("formatFolderCount", () => {
 describe("formatSendStatus", () => {
   it("states that sends execute directly", () => {
     expect(formatSendStatus(["ops@example.com"])).toBe("sent to ops@example.com");
+  });
+});
+
+describe("getManualSyncButtonState", () => {
+  it("disables manual sync when no account is selected", () => {
+    expect(getManualSyncButtonState(null, false)).toEqual({
+      className: "icon-button sync-button",
+      disabled: true,
+      title: "Sync account"
+    });
+  });
+
+  it("shows a pending state while manual sync is running", () => {
+    expect(getManualSyncButtonState("acct-1", true)).toEqual({
+      className: "icon-button sync-button syncing",
+      disabled: true,
+      title: "Sync running"
+    });
   });
 });
 

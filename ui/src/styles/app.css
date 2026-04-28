@@ -317,6 +317,24 @@ button {
   width: 36px;
 }
 
+.sync-button.syncing {
+  cursor: progress;
+}
+
+.sync-button.syncing svg {
+  animation: sync-spin 0.9s linear infinite;
+}
+
+@keyframes sync-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .icon-button:hover,
 .detail-toolbar button:hover,
 .modal-panel button:hover,
