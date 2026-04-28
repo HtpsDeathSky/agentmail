@@ -73,34 +73,28 @@ describe("api demo AI bindings", () => {
     await expect(api.startAccountWatchers("demo-account")).resolves.toBeNull();
   });
 
-  it("shows queued sends in Sent immediately and removes the placeholder on reject", async () => {
+  it("sends directly in the browser demo and records Sent mail", async () => {
     const account = await api.saveAccountConfig({
       id: null,
-      display_name: "Queued Send Demo",
-      email: "queued-send-demo@example.com",
+      display_name: "Direct Send Demo",
+      email: "direct-send-demo@example.com",
       password: "plain-mail-secret",
-      imap_host: "imap.queued-send.example.com",
+      imap_host: "imap.direct-send.example.com",
       imap_port: 993,
       imap_tls: true,
-      smtp_host: "smtp.queued-send.example.com",
+      smtp_host: "smtp.direct-send.example.com",
       smtp_port: 465,
       smtp_tls: true,
       sync_enabled: true
     });
 
-    const pendingId = await api.sendMessage({
+    const sentMessageId = await api.sendMessage({
       account_id: account.id,
       to: ["sec@example.com"],
       cc: ["ops-lead@example.com"],
-      subject: "Demo queued send",
-      body: "Visible before confirmation"
+      subject: "Demo direct send",
+      body: "Visible after SMTP success"
     });
-
-    const pending = (await api.listPendingActions(account.id)).find((action) => action.id === pendingId);
-    expect(pending).toBeDefined();
-    expect(pending?.draft?.subject).toBe("Demo queued send");
-    expect(pending?.draft?.message_id_header).toMatch(/^<.+@agentmail\.local>$/);
-    expect(pending?.local_message_id).toBeTruthy();
 
     const sentFolder = (await api.listFolders(account.id)).find(
       (folder) => folder.account_id === account.id && folder.role === "sent"
@@ -115,29 +109,417 @@ describe("api demo AI bindings", () => {
       limit: 10,
       offset: 0
     });
-    const placeholder = sentMessages.find((message) => message.id === pending?.local_message_id);
-    expect(placeholder).toBeDefined();
-    expect(placeholder?.uid).toBeNull();
-    expect(placeholder?.message_id_header).toBe(pending?.draft?.message_id_header);
-    expect(placeholder?.sender).toBe(account.email);
-    expect(placeholder?.recipients).toEqual(["sec@example.com"]);
-    expect(placeholder?.cc).toEqual(["ops-lead@example.com"]);
-    expect(placeholder?.subject).toBe("Demo queued send");
-    expect(placeholder?.body).toBe("Visible before confirmation");
+    const sentMessage = sentMessages.find((message) => message.id === sentMessageId);
+    expect(sentMessage).toBeDefined();
+    expect(sentMessage?.uid).toBeNull();
+    expect(sentMessage?.message_id_header).toMatch(/^<.+@agentmail\.local>$/);
+    expect(sentMessage?.sender).toBe(account.email);
+    expect(sentMessage?.recipients).toEqual(["sec@example.com"]);
+    expect(sentMessage?.cc).toEqual(["ops-lead@example.com"]);
+    expect(sentMessage?.subject).toBe("Demo direct send");
+    expect(sentMessage?.body).toBe("Visible after SMTP success");
 
-    await api.rejectAction(pendingId);
+    const audits = await api.getAuditLog(5);
+    expect(audits[0].action).toBe("send");
+    expect(audits[0].status).toBe("executed");
+    expect(audits[0].message_ids).toEqual([sentMessageId]);
+  });
 
-    expect((await api.listPendingActions(account.id)).some((action) => action.id === pendingId)).toBe(false);
+  it("rejects direct sends with an empty recipient list before Sent mutation or audit in the browser demo", async () => {
+    const account = await api.saveAccountConfig({
+      id: null,
+      display_name: "Empty Recipient Demo",
+      email: "empty-recipient-demo@example.com",
+      password: "plain-mail-secret",
+      imap_host: "imap.empty-recipient.example.com",
+      imap_port: 993,
+      imap_tls: true,
+      smtp_host: "smtp.empty-recipient.example.com",
+      smtp_port: 465,
+      smtp_tls: true,
+      sync_enabled: true
+    });
+    const latestAuditBefore = (await api.getAuditLog(1))[0];
+
     await expect(
-      api.listMessages({
+      api.sendMessage({
         account_id: account.id,
-        folder_id: sentFolder?.id,
-        limit: 10,
-        offset: 0
+        to: [],
+        cc: [],
+        subject: "No recipients",
+        body: "This should not create Sent mail."
       })
-    ).resolves.toEqual([]);
-    const sentFolderAfterReject = (await api.listFolders(account.id)).find((folder) => folder.id === sentFolder?.id);
-    expect(sentFolderAfterReject?.total_count).toBe(0);
-    expect(sentFolderAfterReject?.unread_count).toBe(0);
+    ).rejects.toThrow("recipient list is empty");
+
+    const sentFolder = (await api.listFolders(account.id)).find((folder) => folder.account_id === account.id && folder.role === "sent");
+    expect(sentFolder).toBeUndefined();
+    expect((await api.getAuditLog(1))[0].id).toBe(latestAuditBefore.id);
+  });
+
+  it("records multi-message move actions as batch_move in the browser demo", async () => {
+    const folders = await api.listFolders("demo-account");
+    const archiveFolder = folders.find((folder) => folder.account_id === "demo-account" && folder.role === "archive");
+    expect(archiveFolder).toBeDefined();
+
+    const messageIds = ["msg-001", "msg-002"];
+    await expect(
+      api.executeMailAction({
+        action: "move",
+        account_id: "demo-account",
+        message_ids: messageIds,
+        target_folder_id: archiveFolder?.id
+      })
+    ).resolves.toEqual({ kind: "executed", pending_action_id: null });
+
+    const archivedMessages = await api.listMessages({
+      account_id: "demo-account",
+      folder_id: archiveFolder?.id,
+      limit: 20,
+      offset: 0
+    });
+    expect(archivedMessages.filter((message) => messageIds.includes(message.id)).map((message) => message.id).sort()).toEqual(messageIds);
+
+    const audits = await api.getAuditLog(5);
+    expect(audits[0].action).toBe("batch_move");
+    expect(audits[0].status).toBe("executed");
+    expect(audits[0].message_ids).toEqual(messageIds);
+  });
+
+  it("executes explicit permanent_delete on Trash messages in the browser demo", async () => {
+    const trashFolder = (await api.listFolders("demo-account")).find(
+      (folder) => folder.account_id === "demo-account" && folder.role === "trash"
+    );
+    expect(trashFolder).toBeDefined();
+
+    await expect(
+      api.executeMailAction({
+        action: "permanent_delete",
+        account_id: "demo-account",
+        message_ids: ["msg-401"]
+      })
+    ).resolves.toEqual({ kind: "executed", pending_action_id: null });
+
+    const trashMessages = await api.listMessages({
+      account_id: "demo-account",
+      folder_id: trashFolder?.id,
+      limit: 20,
+      offset: 0
+    });
+    expect(trashMessages.some((message) => message.id === "msg-401")).toBe(false);
+
+    const audits = await api.getAuditLog(5);
+    expect(audits[0].action).toBe("permanent_delete");
+    expect(audits[0].status).toBe("executed");
+    expect(audits[0].message_ids).toEqual(["msg-401"]);
+  });
+
+  it("rejects send actions through execute_mail_action without auditing in the browser demo", async () => {
+    const latestAuditBefore = (await api.getAuditLog(1))[0];
+
+    await expect(
+      api.executeMailAction({
+        action: "send",
+        account_id: "demo-account",
+        message_ids: ["msg-003"]
+      })
+    ).rejects.toThrow("send and forward actions must use dedicated commands");
+
+    expect((await api.getAuditLog(1))[0].id).toBe(latestAuditBefore.id);
+  });
+
+  it("rejects forward actions through execute_mail_action without auditing in the browser demo", async () => {
+    const latestAuditBefore = (await api.getAuditLog(1))[0];
+
+    await expect(
+      api.executeMailAction({
+        action: "forward",
+        account_id: "demo-account",
+        message_ids: ["msg-003"]
+      })
+    ).rejects.toThrow("send and forward actions must use dedicated commands");
+
+    expect((await api.getAuditLog(1))[0].id).toBe(latestAuditBefore.id);
+  });
+
+  it("rejects move actions without target folders before mutation or audit in the browser demo", async () => {
+    const latestAuditBefore = (await api.getAuditLog(1))[0];
+
+    await expect(
+      api.executeMailAction({
+        action: "move",
+        account_id: "demo-account",
+        message_ids: ["msg-003"]
+      })
+    ).rejects.toThrow("target folder is required");
+
+    const inboxMessages = await api.listMessages({
+      account_id: "demo-account",
+      folder_id: "demo-account:inbox",
+      limit: 20,
+      offset: 0
+    });
+    expect(inboxMessages.some((message) => message.id === "msg-003")).toBe(true);
+    expect((await api.getAuditLog(1))[0].id).toBe(latestAuditBefore.id);
+  });
+
+  it("rejects move actions to nonexistent target folders before mutation or audit in the browser demo", async () => {
+    const latestAuditBefore = (await api.getAuditLog(1))[0];
+
+    await expect(
+      api.executeMailAction({
+        action: "move",
+        account_id: "demo-account",
+        message_ids: ["msg-003"],
+        target_folder_id: "demo-account:missing-target"
+      })
+    ).rejects.toThrow("target folder not found");
+
+    const inboxMessages = await api.listMessages({
+      account_id: "demo-account",
+      folder_id: "demo-account:inbox",
+      limit: 20,
+      offset: 0
+    });
+    expect(inboxMessages.some((message) => message.id === "msg-003")).toBe(true);
+    expect((await api.getAuditLog(1))[0].id).toBe(latestAuditBefore.id);
+  });
+
+  it("rejects move actions to another account target folder before mutation or audit in the browser demo", async () => {
+    const account = await api.saveAccountConfig({
+      id: null,
+      display_name: "Target Owner Demo",
+      email: "target-owner-demo@example.com",
+      password: "plain-mail-secret",
+      imap_host: "imap.target-owner.example.com",
+      imap_port: 993,
+      imap_tls: true,
+      smtp_host: "smtp.target-owner.example.com",
+      smtp_port: 465,
+      smtp_tls: true,
+      sync_enabled: true
+    });
+    await api.sendMessage({
+      account_id: account.id,
+      to: ["sec@example.com"],
+      cc: [],
+      subject: "Create target folder",
+      body: "This direct send creates a Sent folder for the saved account."
+    });
+    const otherAccountSentFolder = (await api.listFolders(account.id)).find(
+      (folder) => folder.account_id === account.id && folder.role === "sent"
+    );
+    expect(otherAccountSentFolder).toBeDefined();
+    const latestAuditBefore = (await api.getAuditLog(1))[0];
+
+    await expect(
+      api.executeMailAction({
+        action: "move",
+        account_id: "demo-account",
+        message_ids: ["msg-003"],
+        target_folder_id: otherAccountSentFolder?.id
+      })
+    ).rejects.toThrow("target folder does not belong to account");
+
+    const inboxMessages = await api.listMessages({
+      account_id: "demo-account",
+      folder_id: "demo-account:inbox",
+      limit: 20,
+      offset: 0
+    });
+    expect(inboxMessages.some((message) => message.id === "msg-003")).toBe(true);
+    expect((await api.getAuditLog(1))[0].id).toBe(latestAuditBefore.id);
+  });
+
+  it("rejects delete when the account has no Trash folder before mutation or audit in the browser demo", async () => {
+    const account = await api.saveAccountConfig({
+      id: null,
+      display_name: "No Trash Demo",
+      email: "no-trash-demo@example.com",
+      password: "plain-mail-secret",
+      imap_host: "imap.no-trash.example.com",
+      imap_port: 993,
+      imap_tls: true,
+      smtp_host: "smtp.no-trash.example.com",
+      smtp_port: 465,
+      smtp_tls: true,
+      sync_enabled: true
+    });
+    const messageId = await api.sendMessage({
+      account_id: account.id,
+      to: ["sec@example.com"],
+      cc: [],
+      subject: "Delete requires Trash",
+      body: "This message should remain in Sent when Trash is missing."
+    });
+    const sentFolder = (await api.listFolders(account.id)).find((folder) => folder.account_id === account.id && folder.role === "sent");
+    expect(sentFolder).toBeDefined();
+    expect((await api.listFolders(account.id)).some((folder) => folder.account_id === account.id && folder.role === "trash")).toBe(false);
+    const latestAuditBefore = (await api.getAuditLog(1))[0];
+
+    await expect(
+      api.executeMailAction({
+        action: "delete",
+        account_id: account.id,
+        message_ids: [messageId]
+      })
+    ).rejects.toThrow("trash folder not found");
+
+    const sentMessages = await api.listMessages({
+      account_id: account.id,
+      folder_id: sentFolder?.id,
+      limit: 10,
+      offset: 0
+    });
+    expect(sentMessages.some((message) => message.id === messageId)).toBe(true);
+    expect((await api.getAuditLog(1))[0].id).toBe(latestAuditBefore.id);
+  });
+
+  it("rejects archive when the account has no Archive folder before mutation or audit in the browser demo", async () => {
+    const account = await api.saveAccountConfig({
+      id: null,
+      display_name: "No Archive Demo",
+      email: "no-archive-demo@example.com",
+      password: "plain-mail-secret",
+      imap_host: "imap.no-archive.example.com",
+      imap_port: 993,
+      imap_tls: true,
+      smtp_host: "smtp.no-archive.example.com",
+      smtp_port: 465,
+      smtp_tls: true,
+      sync_enabled: true
+    });
+    const messageId = await api.sendMessage({
+      account_id: account.id,
+      to: ["sec@example.com"],
+      cc: [],
+      subject: "Archive requires Archive",
+      body: "This message should remain in Sent when Archive is missing."
+    });
+    const sentFolder = (await api.listFolders(account.id)).find((folder) => folder.account_id === account.id && folder.role === "sent");
+    expect(sentFolder).toBeDefined();
+    expect((await api.listFolders(account.id)).some((folder) => folder.account_id === account.id && folder.role === "archive")).toBe(false);
+    const latestAuditBefore = (await api.getAuditLog(1))[0];
+
+    await expect(
+      api.executeMailAction({
+        action: "archive",
+        account_id: account.id,
+        message_ids: [messageId]
+      })
+    ).rejects.toThrow("archive folder not found");
+
+    const sentMessages = await api.listMessages({
+      account_id: account.id,
+      folder_id: sentFolder?.id,
+      limit: 10,
+      offset: 0
+    });
+    expect(sentMessages.some((message) => message.id === messageId)).toBe(true);
+    expect((await api.getAuditLog(1))[0].id).toBe(latestAuditBefore.id);
+  });
+
+  it("rejects mixed-folder batch actions before mutating or auditing in the browser demo", async () => {
+    const archiveFolder = (await api.listFolders("demo-account")).find(
+      (folder) => folder.account_id === "demo-account" && folder.role === "archive"
+    );
+    expect(archiveFolder).toBeDefined();
+    const latestAuditBefore = (await api.getAuditLog(1))[0];
+
+    await expect(
+      api.executeMailAction({
+        action: "batch_delete",
+        account_id: "demo-account",
+        message_ids: ["msg-003", "msg-201"]
+      })
+    ).rejects.toThrow("all messages in one action must be in the same folder");
+
+    const inboxMessages = await api.listMessages({
+      account_id: "demo-account",
+      folder_id: "demo-account:inbox",
+      limit: 20,
+      offset: 0
+    });
+    const archiveMessages = await api.listMessages({
+      account_id: "demo-account",
+      folder_id: archiveFolder?.id,
+      limit: 20,
+      offset: 0
+    });
+    expect(inboxMessages.some((message) => message.id === "msg-003")).toBe(true);
+    expect(archiveMessages.some((message) => message.id === "msg-201")).toBe(true);
+    expect((await api.getAuditLog(1))[0].id).toBe(latestAuditBefore.id);
+  });
+
+  it("rejects missing and wrong-account action message ids in the browser demo", async () => {
+    const account = await api.saveAccountConfig({
+      id: null,
+      display_name: "Validation Demo",
+      email: "validation-demo@example.com",
+      password: "plain-mail-secret",
+      imap_host: "imap.validation.example.com",
+      imap_port: 993,
+      imap_tls: true,
+      smtp_host: "smtp.validation.example.com",
+      smtp_port: 465,
+      smtp_tls: true,
+      sync_enabled: true
+    });
+    const otherAccountMessageId = await api.sendMessage({
+      account_id: account.id,
+      to: ["sec@example.com"],
+      cc: [],
+      subject: "Wrong account validation",
+      body: "This message belongs to a different demo account."
+    });
+
+    await expect(
+      api.executeMailAction({
+        action: "mark_read",
+        account_id: "demo-account",
+        message_ids: ["missing-demo-message"]
+      })
+    ).rejects.toThrow("message not found");
+
+    await expect(
+      api.executeMailAction({
+        action: "mark_read",
+        account_id: "demo-account",
+        message_ids: [otherAccountMessageId]
+      })
+    ).rejects.toThrow("message does not belong to account");
+  });
+
+  it("executes explicit batch_delete by moving non-Trash messages to Trash in the browser demo", async () => {
+    const trashFolder = (await api.listFolders("demo-account")).find(
+      (folder) => folder.account_id === "demo-account" && folder.role === "trash"
+    );
+    expect(trashFolder).toBeDefined();
+
+    const messageIds = ["msg-001", "msg-002"];
+    await expect(
+      api.executeMailAction({
+        action: "batch_delete",
+        account_id: "demo-account",
+        message_ids: messageIds
+      })
+    ).resolves.toEqual({ kind: "executed", pending_action_id: null });
+
+    const trashMessages = await api.listMessages({
+      account_id: "demo-account",
+      folder_id: trashFolder?.id,
+      limit: 20,
+      offset: 0
+    });
+    const movedMessages = trashMessages.filter((message) => messageIds.includes(message.id));
+    expect(movedMessages.map((message) => message.id).sort()).toEqual(messageIds);
+    expect(movedMessages.every((message) => message.uid === null)).toBe(true);
+
+    const refreshedTrashFolder = (await api.listFolders("demo-account")).find((folder) => folder.id === trashFolder?.id);
+    expect(refreshedTrashFolder?.total_count).toBeGreaterThanOrEqual(messageIds.length);
+
+    const audits = await api.getAuditLog(5);
+    expect(audits[0].action).toBe("batch_delete");
+    expect(audits[0].status).toBe("executed");
+    expect(audits[0].message_ids).toEqual(messageIds);
   });
 });

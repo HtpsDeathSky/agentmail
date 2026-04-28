@@ -8,7 +8,6 @@ import type {
   MailAccount,
   MailActionAudit,
   MailActionResult,
-  MailActionKind,
   MailActionRequest,
   MailFolder,
   MailMessage,
@@ -19,20 +18,6 @@ import type {
   SyncState,
   SyncSummary
 } from "../api";
-
-interface DemoPendingMailAction {
-  id: string;
-  account_id: string;
-  action: MailActionKind;
-  message_ids: string[];
-  target_folder_id?: string | null;
-  local_message_id?: string | null;
-  draft?: SendMessageDraft | null;
-  status: "pending" | "accepted" | "rejected" | "executed" | "failed";
-  error_message?: string | null;
-  created_at: string;
-  updated_at: string;
-}
 
 const now = () => new Date().toISOString();
 
@@ -127,8 +112,8 @@ let messages: MailMessage[] = [
     recipients: ["infra-watch@example.net"],
     cc: [],
     received_at: now(),
-    body_preview: "Confirmation sent through the pending action queue.",
-    body: "Confirmation sent through the pending action queue.\n\nThis row exercises non-INBOX folder navigation in the browser demo.",
+    body_preview: "Confirmation sent directly after compose submit.",
+    body: "Confirmation sent directly after compose submit.\n\nThis row exercises non-INBOX folder navigation in the browser demo.",
     attachments: [],
     flags: { is_read: true, is_starred: false, is_answered: false, is_forwarded: false },
     size_bytes: 2048,
@@ -206,7 +191,6 @@ let accounts = [account];
 let accountPasswords: Record<string, string> = {
   [account.id]: "demo-mail-secret"
 };
-let pendingActions: DemoPendingMailAction[] = [];
 let aiSettings: AiSettingsView | null = {
   provider_name: "openai-compatible",
   base_url: "https://api.example.com/v1",
@@ -381,51 +365,71 @@ export const demoBackend = {
       }
       case "execute_mail_action": {
         const request = args?.request as MailActionRequest;
-        if (
-          request.action === "send" ||
-          request.action === "forward" ||
-          request.action === "permanent_delete" ||
-          request.action === "batch_delete" ||
-          request.action === "batch_move"
-        ) {
-          const pending: DemoPendingMailAction = {
-            id: crypto.randomUUID(),
-            account_id: request.account_id,
-            action: request.action,
-            message_ids: request.message_ids,
-            target_folder_id: request.target_folder_id ?? null,
-            draft: null,
-            status: "pending",
-            error_message: null,
-            created_at: now(),
-            updated_at: now()
-          };
-          pendingActions = [pending, ...pendingActions];
-          recordAudit(request.action, request.account_id, request.message_ids, "queued");
-          return actionResult("pending", pending.id);
+        if (request.action === "send" || request.action === "forward") {
+          throw new Error("send and forward actions must use dedicated commands");
         }
+        if (request.message_ids.length === 0) throw new Error("message_ids must not be empty");
+        const selected = request.message_ids.map((messageId) => {
+          const message = messages.find((candidate) => candidate.id === messageId && !candidate.deleted_at);
+          if (!message) throw new Error("message not found");
+          return message;
+        });
+        if (selected.some((message) => message.account_id !== request.account_id)) throw new Error("message does not belong to account");
+        if (new Set(selected.map((message) => message.folder_id)).size !== 1) {
+          throw new Error("all messages in one action must be in the same folder");
+        }
+        const isMove = request.action === "move" || request.action === "batch_move";
+        if (isMove) {
+          if (!request.target_folder_id) throw new Error("target folder is required");
+          const targetFolder = folders.find((folder) => folder.id === request.target_folder_id);
+          if (!targetFolder) throw new Error("target folder not found");
+          if (targetFolder.account_id !== request.account_id) throw new Error("target folder does not belong to account");
+        }
+        const trashFolder = folders.find((folder) => folder.account_id === request.account_id && folder.role === "trash");
+        const archiveFolder = folders.find((folder) => folder.account_id === request.account_id && folder.role === "archive");
+        const allSelectedInTrash =
+          selected.length > 0 &&
+          selected.every((message) => folders.find((folder) => folder.id === message.folder_id)?.role === "trash");
+        const isPermanentDelete = request.action === "permanent_delete" || ((request.action === "delete" || request.action === "batch_delete") && allSelectedInTrash);
+        const isDeleteToTrash = (request.action === "delete" || request.action === "batch_delete") && !isPermanentDelete;
+        if (isDeleteToTrash && !trashFolder) throw new Error("trash folder not found");
+        if (request.action === "archive" && !archiveFolder) throw new Error("archive folder not found");
+        const recordedAction =
+          isPermanentDelete
+            ? "permanent_delete"
+            : isDeleteToTrash && request.message_ids.length > 1
+              ? "batch_delete"
+              : isMove && request.message_ids.length > 1
+                ? "batch_move"
+                : request.action;
+
         messages = messages.map((message) => {
           if (!request.message_ids.includes(message.id)) return message;
           if (request.action === "mark_read") return { ...message, flags: { ...message.flags, is_read: true } };
           if (request.action === "mark_unread") return { ...message, flags: { ...message.flags, is_read: false } };
           if (request.action === "star") return { ...message, flags: { ...message.flags, is_starred: true } };
           if (request.action === "unstar") return { ...message, flags: { ...message.flags, is_starred: false } };
-          if (request.action === "delete") return { ...message, folder_id: folders.find((folder) => folder.role === "trash")?.id ?? message.folder_id, uid: null };
-          if ((request.action === "move" || request.action === "archive") && request.target_folder_id) {
+          if (isPermanentDelete) return { ...message, deleted_at: now() };
+          if (isDeleteToTrash && trashFolder) return { ...message, folder_id: trashFolder.id, uid: null };
+          if (isMove && request.target_folder_id) {
             return { ...message, folder_id: request.target_folder_id, uid: null };
           }
-          if (request.action === "archive") {
-            return { ...message, folder_id: folders.find((folder) => folder.role === "archive")?.id ?? message.folder_id, uid: null };
-          }
+          if (request.action === "archive" && archiveFolder) return { ...message, folder_id: archiveFolder.id, uid: null };
           return message;
         });
-        recordAudit(request.action, request.account_id, request.message_ids);
+        folders = folders.map((folder) => ({
+          ...folder,
+          total_count: messages.filter((message) => message.folder_id === folder.id && !message.deleted_at).length,
+          unread_count: messages.filter((message) => message.folder_id === folder.id && !message.deleted_at && !message.flags.is_read).length
+        }));
+        recordAudit(recordedAction, request.account_id, request.message_ids);
         return actionResult("executed");
       }
       case "send_message": {
         const incomingDraft = args?.draft as SendMessageDraft;
         const draftAccount = accounts.find((item) => item.id === incomingDraft.account_id);
         if (!draftAccount) throw new Error("account not found");
+        if (incomingDraft.to.length === 0) throw new Error("recipient list is empty");
         let sentFolder =
           folders.find((folder) => folder.account_id === incomingDraft.account_id && folder.role === "sent") ??
           folders.find((folder) => folder.account_id === incomingDraft.account_id && isSentFolderPath(folder.path));
@@ -446,20 +450,6 @@ export const demoBackend = {
         const messageId = crypto.randomUUID();
         const messageIdHeader = incomingDraft.message_id_header ?? `<${messageId}@agentmail.local>`;
         const draft: SendMessageDraft = { ...incomingDraft, message_id_header: messageIdHeader };
-        const pending: DemoPendingMailAction = {
-          id: crypto.randomUUID(),
-          account_id: draft.account_id,
-          action: "send",
-          message_ids: [],
-          target_folder_id: null,
-          local_message_id: messageId,
-          draft,
-          status: "pending",
-          error_message: null,
-          created_at: now(),
-          updated_at: now()
-        };
-        pendingActions = [pending, ...pendingActions];
         const bodyPreview = draft.body.trim() || "(empty message)";
         messages = [
           {
@@ -484,49 +474,11 @@ export const demoBackend = {
         ];
         sentFolder.total_count = messages.filter((message) => message.folder_id === sentFolder.id && !message.deleted_at).length;
         sentFolder.unread_count = messages.filter((message) => message.folder_id === sentFolder.id && !message.deleted_at && !message.flags.is_read).length;
-        recordAudit("send", draft.account_id, [], "queued");
-        return pending.id;
+        recordAudit("send", draft.account_id, [messageId], "executed");
+        return messageId;
       }
       case "get_audit_log":
         return audits;
-      case "list_pending_actions": {
-        const accountId = (args?.accountId ?? args?.account_id) as string | null | undefined;
-        return pendingActions.filter((action) => action.status === "pending").filter((action) => !accountId || action.account_id === accountId);
-      }
-      case "confirm_action": {
-        const actionId = (args?.actionId ?? args?.action_id) as string;
-        const pending = pendingActions.find((action) => action.id === actionId);
-        if (!pending) throw new Error("pending action not found");
-        pending.status = "executed";
-        pending.updated_at = now();
-        recordAudit(pending.action, pending.account_id, pending.message_ids, "accepted");
-        recordAudit(pending.action, pending.account_id, pending.message_ids, "executed");
-        return actionResult("executed");
-      }
-      case "reject_action": {
-        const actionId = (args?.actionId ?? args?.action_id) as string;
-        const pending = pendingActions.find((action) => action.id === actionId);
-        if (!pending) throw new Error("pending action not found");
-        pending.status = "rejected";
-        pending.updated_at = now();
-        if (pending.action === "send" && pending.local_message_id) {
-          const placeholder = messages.find((message) => message.id === pending.local_message_id);
-          const folder = placeholder ? folders.find((item) => item.id === placeholder.folder_id) : null;
-          if (
-            placeholder &&
-            folder?.role === "sent" &&
-            placeholder.account_id === pending.account_id &&
-            placeholder.uid == null &&
-            placeholder.message_id_header === pending.draft?.message_id_header
-          ) {
-            placeholder.deleted_at = now();
-            folder.total_count = messages.filter((message) => message.folder_id === folder.id && !message.deleted_at).length;
-            folder.unread_count = messages.filter((message) => message.folder_id === folder.id && !message.deleted_at && !message.flags.is_read).length;
-          }
-        }
-        recordAudit(pending.action, pending.account_id, pending.message_ids, "rejected");
-        return null;
-      }
       case "get_ai_settings":
         return aiSettings;
       case "save_ai_settings": {
