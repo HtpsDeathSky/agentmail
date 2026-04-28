@@ -985,23 +985,27 @@ button {
 }
 
 .audit-feed {
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.activity-log-textbox {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 8px;
   overflow: auto;
-}
-
-.audit-feed p {
-  margin: 0;
-  overflow-wrap: anywhere;
-  white-space: normal;
-}
-
-.audit-feed code {
-  display: block;
-  padding: 3px 6px;
-  overflow-wrap: anywhere;
   border: 1px solid var(--color-border-inset);
   border-radius: 3px;
   background: var(--color-surface);
-  white-space: normal;
+  color: var(--color-text-soft-4);
+  font: 11px/1.45 "Cascadia Mono", Consolas, monospace;
+  resize: none;
+}
+
+.activity-log-textbox:focus {
+  outline: 1px solid var(--color-accent-border-soft);
+  outline-offset: -1px;
 }
 
 .empty-state,

@@ -11,6 +11,7 @@ import {
   runManualAccountSync
 } from "./lib/syncFlows";
 import { getManualSyncButtonState } from "./lib/syncUi";
+import { appendActivityLogEntry, buildActivityLogText } from "./lib/activityLog";
 import {
   ACTIVITY_LOG_STORAGE_KEY,
   applyThemeModeToDocument,
@@ -55,6 +56,30 @@ describe("getManualSyncButtonState", () => {
       disabled: true,
       title: "Sync running"
     });
+  });
+});
+
+describe("activity log helpers", () => {
+  it("appends timestamped session log entries without mutating previous entries", () => {
+    const existing = appendActivityLogEntry([], "app startup", () => new Date("2026-04-28T09:00:00Z"));
+    const next = appendActivityLogEntry(existing, "manual sync started", () => new Date("2026-04-28T09:00:05Z"));
+
+    expect(existing).toHaveLength(1);
+    expect(next).toEqual([
+      { id: 1, timestamp: "2026-04-28T09:00:00.000Z", message: "app startup" },
+      { id: 2, timestamp: "2026-04-28T09:00:05.000Z", message: "manual sync started" }
+    ]);
+  });
+
+  it("formats session log entries as one newline-delimited text block", () => {
+    const text = buildActivityLogText([
+      { id: 1, timestamp: "2026-04-28T09:00:00.000Z", message: "app startup" },
+      { id: 2, timestamp: "2026-04-28T09:00:05.000Z", message: "manual sync started" }
+    ]);
+
+    expect(text).toContain("app startup");
+    expect(text).toContain("\n");
+    expect(text).toContain("manual sync started");
   });
 });
 
@@ -315,7 +340,9 @@ describe("runInitialAccountSync", () => {
     });
 
     expect(startAccountWatchers).toHaveBeenCalledWith("acct-1");
-    expect(status).toBe("account saved and initial sync complete: ops@example.com / 4 folders / 18 messages");
+    expect(status).toBe(
+      "account saved and initial sync complete: ops@example.com / 4 folders / 18 messages / watcher start failed: Error: watch unavailable"
+    );
   });
 
   it("keeps the saved account path alive when initial sync fails and skips watcher startup", async () => {
@@ -466,5 +493,33 @@ describe("runManualAccountSync", () => {
     expect(refreshMessages).toHaveBeenCalledWith("acct-1", "acct-1:inbox", "");
     expect(refreshSyncState).toHaveBeenCalledWith("acct-1");
     expect(refreshAudits).toHaveBeenCalled();
+  });
+
+  it("keeps manual sync successful while reporting watcher restart failures", async () => {
+    const syncAccount = vi.fn().mockResolvedValue({
+      account_id: "acct-1",
+      folders: 2,
+      messages: 5,
+      synced_at: "2026-04-28T00:00:00Z"
+    });
+    const startAccountWatchers = vi.fn().mockRejectedValue(new Error("IDLE unavailable"));
+    const refreshFolders = vi.fn().mockResolvedValue(undefined);
+    const refreshMessages = vi.fn().mockResolvedValue(undefined);
+    const refreshSyncState = vi.fn().mockResolvedValue(undefined);
+    const refreshAudits = vi.fn().mockResolvedValue(undefined);
+
+    const status = await runManualAccountSync({
+      accountId: "acct-1",
+      folderId: "acct-1:inbox",
+      query: "",
+      syncAccount,
+      startAccountWatchers,
+      refreshFolders,
+      refreshMessages,
+      refreshSyncState,
+      refreshAudits
+    });
+
+    expect(status).toBe("sync complete: 2 folders / 5 messages / watcher start failed: Error: IDLE unavailable");
   });
 });

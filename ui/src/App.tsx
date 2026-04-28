@@ -41,14 +41,12 @@ import {
   AiSettingsView,
   api,
   MailAccount,
-  MailActionAudit,
   MailActionKind,
   MailFolder,
   MailMessage,
   SaveAccountConfigRequest,
   SaveAiSettingsRequest,
   SendMessageDraft,
-  SyncState
 } from "./api";
 import {
   applyThemeModeToDocument,
@@ -62,7 +60,7 @@ import {
   type ThemeMode
 } from "./lib/storage";
 import { actionLabels } from "./lib/mailActions";
-import { formatAuditLine, formatFolderCount, formatSize, formatTime } from "./lib/format";
+import { formatFolderCount, formatSize, formatTime } from "./lib/format";
 import {
   refreshAfterMailSyncEvent,
   runDirectSendFlow,
@@ -71,6 +69,7 @@ import {
   type MailSyncEventPayload
 } from "./lib/syncFlows";
 import { getManualSyncButtonState } from "./lib/syncUi";
+import { appendActivityLogEntry, buildActivityLogText, type ActivityLogEntry } from "./lib/activityLog";
 
 const defaultAccountConfigForm: SaveAccountConfigRequest = {
   id: null,
@@ -144,8 +143,6 @@ export function App() {
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   const [selectedMessage, setSelectedMessage] = useState<MailMessage | null>(null);
-  const [syncStates, setSyncStates] = useState<SyncState[]>([]);
-  const [audits, setAudits] = useState<MailActionAudit[]>([]);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("backend link idle");
   const [isConfigOpen, setConfigOpen] = useState(false);
@@ -155,6 +152,7 @@ export function App() {
   const [isAnalyzing, setAnalyzing] = useState(false);
   const [isActionRunning, setActionRunning] = useState(false);
   const [isManualSyncing, setManualSyncing] = useState(false);
+  const [activityLogEntries, setActivityLogEntries] = useState<ActivityLogEntry[]>([]);
   const [aiStatus, setAiStatus] = useState("ai link idle");
   const [themeMode, setThemeMode] = useState<ThemeMode>(() =>
     typeof window === "undefined" ? "dark" : readStoredThemeMode(window.localStorage)
@@ -171,15 +169,22 @@ export function App() {
   const mailWorkspaceRef = useRef<HTMLDivElement | null>(null);
   const messagesRef = useRef<MailMessage[]>([]);
   const selectedAccountIdRef = useRef<string | null>(null);
-  const selectedAccountSyncEnabledRef = useRef(true);
   const selectedFolderIdRef = useRef<string | null>(null);
   const selectedMessageIdRef = useRef<string | null>(null);
   const queryRef = useRef("");
+
+  const appendActivityLog = useCallback((message: string) => {
+    setActivityLogEntries((current) => appendActivityLogEntry(current, message));
+  }, []);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
     applyThemeModeToDocument(document.documentElement, typeof window === "undefined" ? null : window.localStorage, themeMode);
   }, [themeMode]);
+
+  useEffect(() => {
+    appendActivityLog("app startup");
+  }, [appendActivityLog]);
 
   useEffect(() => {
     writeStoredActivityLogVisibility(typeof window === "undefined" ? null : window.localStorage, showActivityLog);
@@ -216,13 +221,8 @@ export function App() {
     () => folders.find((folder) => folder.id === selectedFolderId) ?? null,
     [folders, selectedFolderId]
   );
-  const accountSyncState = useMemo(
-    () => syncStates.find((state) => state.folder_id === null || state.folder_id === undefined) ?? syncStates[0] ?? null,
-    [syncStates]
-  );
-
   const refreshAudits = useCallback(async () => {
-    setAudits(await api.getAuditLog(25));
+    await api.getAuditLog(25);
   }, []);
 
   const refreshAccounts = useCallback(async () => {
@@ -230,7 +230,8 @@ export function App() {
     setAccounts(nextAccounts);
     setSelectedAccountId((current) => current ?? nextAccounts[0]?.id ?? null);
     setStatus(`accounts loaded: ${nextAccounts.length}`);
-  }, []);
+    appendActivityLog(`accounts loaded: ${nextAccounts.length}`);
+  }, [appendActivityLog]);
 
   const refreshFolders = useCallback(async (accountId: string) => {
     const nextFolders = await api.listFolders(accountId);
@@ -239,7 +240,8 @@ export function App() {
       if (current && nextFolders.some((folder) => folder.id === current)) return current;
       return nextFolders.find((folder) => folder.role === "inbox")?.id ?? nextFolders[0]?.id ?? null;
     });
-  }, []);
+    appendActivityLog(`folders loaded: ${accountId} / ${nextFolders.length}`);
+  }, [appendActivityLog]);
 
   const refreshMessages = useCallback(async (accountId: string, folderId: string | null, searchTerm: string) => {
     const nextMessages = searchTerm.trim()
@@ -250,16 +252,20 @@ export function App() {
       if (current && nextMessages.some((message) => message.id === current)) return current;
       return nextMessages[0]?.id ?? null;
     });
-    setStatus(searchTerm.trim() ? `search returned ${nextMessages.length} rows` : `message index loaded: ${nextMessages.length}`);
-  }, []);
+    const nextStatus = searchTerm.trim() ? `search returned ${nextMessages.length} rows` : `message index loaded: ${nextMessages.length}`;
+    setStatus(nextStatus);
+    appendActivityLog(nextStatus);
+  }, [appendActivityLog]);
 
   const refreshSyncState = useCallback(async (accountId: string) => {
-    setSyncStates(await api.getSyncStatus(accountId));
-  }, []);
+    await api.getSyncStatus(accountId);
+    appendActivityLog(`sync state loaded: ${accountId}`);
+  }, [appendActivityLog]);
 
   const refreshAiSettings = useCallback(async () => {
     setAiSettings(await api.getAiSettings());
-  }, []);
+    appendActivityLog("ai settings loaded");
+  }, [appendActivityLog]);
 
   const aiHeaderStatus = useMemo(() => {
     if (aiSettings?.enabled && aiSettings.api_key_mask) return "AI READY";
@@ -268,23 +274,36 @@ export function App() {
   }, [aiSettings]);
 
   useEffect(() => {
-    void Promise.all([refreshAccounts().then(refreshAudits), refreshAiSettings()]).catch((error) =>
-      setStatus(`startup failed: ${String(error)}`)
-    );
-  }, [refreshAccounts, refreshAiSettings, refreshAudits]);
+    appendActivityLog("startup refresh started");
+    void Promise.all([refreshAccounts().then(refreshAudits), refreshAiSettings()])
+      .then(() => appendActivityLog("startup refresh complete"))
+      .catch((error) => {
+        const nextStatus = `startup failed: ${String(error)}`;
+        setStatus(nextStatus);
+        appendActivityLog(nextStatus);
+      });
+  }, [appendActivityLog, refreshAccounts, refreshAiSettings, refreshAudits]);
 
   useEffect(() => {
     if (!selectedAccountId) return;
     void Promise.all([refreshFolders(selectedAccountId), refreshSyncState(selectedAccountId)])
-      .catch((error) => setStatus(`folder load failed: ${String(error)}`));
-  }, [refreshFolders, refreshSyncState, selectedAccountId]);
+      .catch((error) => {
+        const nextStatus = `folder load failed: ${String(error)}`;
+        setStatus(nextStatus);
+        appendActivityLog(nextStatus);
+      });
+  }, [appendActivityLog, refreshFolders, refreshSyncState, selectedAccountId]);
 
   useEffect(() => {
     if (!selectedAccountId) return;
     startTransition(() => {
-      void refreshMessages(selectedAccountId, selectedFolderId, query).catch((error) => setStatus(`message load failed: ${String(error)}`));
+      void refreshMessages(selectedAccountId, selectedFolderId, query).catch((error) => {
+        const nextStatus = `message load failed: ${String(error)}`;
+        setStatus(nextStatus);
+        appendActivityLog(nextStatus);
+      });
     });
-  }, [query, refreshMessages, selectedAccountId, selectedFolderId]);
+  }, [appendActivityLog, query, refreshMessages, selectedAccountId, selectedFolderId]);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -293,10 +312,6 @@ export function App() {
   useEffect(() => {
     selectedAccountIdRef.current = selectedAccountId;
   }, [selectedAccountId]);
-
-  useEffect(() => {
-    selectedAccountSyncEnabledRef.current = selectedAccount?.sync_enabled ?? true;
-  }, [selectedAccount?.sync_enabled]);
 
   useEffect(() => {
     selectedFolderIdRef.current = selectedFolderId;
@@ -315,6 +330,11 @@ export function App() {
     let isCancelled = false;
 
     void listen<MailSyncEventPayload>(MAIL_SYNC_EVENT, (event) => {
+      appendActivityLog(
+        `mail sync event: ${event.payload.reason} / account ${event.payload.account_id} / folder ${
+          event.payload.folder_id ?? "account"
+        }${event.payload.message ? ` / ${event.payload.message}` : ""}`
+      );
       void refreshAfterMailSyncEvent({
         payload: event.payload,
         selectedAccountId: selectedAccountIdRef.current,
@@ -326,9 +346,19 @@ export function App() {
         refreshAudits
       })
         .then((didRefresh) => {
-          if (didRefresh) setStatus(`mail sync updated: ${event.payload.reason}`);
+          if (didRefresh) {
+            const nextStatus = `mail sync updated: ${event.payload.reason}`;
+            setStatus(nextStatus);
+            appendActivityLog(nextStatus);
+          } else {
+            appendActivityLog(`mail sync event ignored for inactive account: ${event.payload.account_id}`);
+          }
         })
-        .catch((error) => setStatus(`mail sync refresh failed: ${String(error)}`));
+        .catch((error) => {
+          const nextStatus = `mail sync refresh failed: ${String(error)}`;
+          setStatus(nextStatus);
+          appendActivityLog(nextStatus);
+        });
     })
       .then((dispose) => {
         if (isCancelled) {
@@ -343,7 +373,7 @@ export function App() {
       isCancelled = true;
       unlisten?.();
     };
-  }, [refreshAudits, refreshFolders, refreshMessages, refreshSyncState]);
+  }, [appendActivityLog, refreshAudits, refreshFolders, refreshMessages, refreshSyncState]);
 
   useEffect(() => {
     setSelectedMessage(null);
@@ -388,28 +418,32 @@ export function App() {
     if (!selectedAccountId || isManualSyncing) return;
     setManualSyncing(true);
     setStatus("sync running");
+    appendActivityLog(`manual sync started: ${selectedAccountId}`);
     try {
-      setStatus(
-        await runManualAccountSync({
-          accountId: selectedAccountId,
-          folderId: selectedFolderId,
-          query,
-          syncAccount: api.syncAccount,
-          startAccountWatchers: api.startAccountWatchers,
-          refreshFolders,
-          refreshMessages,
-          refreshSyncState,
-          refreshAudits
-        })
-      );
+      const nextStatus = await runManualAccountSync({
+        accountId: selectedAccountId,
+        folderId: selectedFolderId,
+        query,
+        syncAccount: api.syncAccount,
+        startAccountWatchers: api.startAccountWatchers,
+        refreshFolders,
+        refreshMessages,
+        refreshSyncState,
+        refreshAudits
+      });
+      setStatus(nextStatus);
+      appendActivityLog(nextStatus);
     } catch (error) {
       await refreshSyncState(selectedAccountId);
       await refreshAudits();
-      setStatus(`sync failed: ${String(error)}`);
+      const nextStatus = `sync failed: ${String(error)}`;
+      setStatus(nextStatus);
+      appendActivityLog(nextStatus);
     } finally {
       setManualSyncing(false);
     }
   }, [
+    appendActivityLog,
     isManualSyncing,
     query,
     refreshAudits,
@@ -425,6 +459,7 @@ export function App() {
       if (!selectedAccountId || !selectedMessageId || isActionRunning || isAnalyzing) return;
       setActionRunning(true);
       setStatus(`action running: ${actionLabels[action]}`);
+      appendActivityLog(`action started: ${actionLabels[action]} / ${selectedMessageId}`);
       try {
         await api.executeMailAction({
           action,
@@ -435,14 +470,19 @@ export function App() {
         await refreshFolders(selectedAccountId);
         await refreshMessages(selectedAccountId, selectedFolderId, query);
         await refreshAudits();
-        setStatus(`action executed: ${actionLabels[action]}`);
+        const nextStatus = `action executed: ${actionLabels[action]}`;
+        setStatus(nextStatus);
+        appendActivityLog(nextStatus);
       } catch (error) {
-        setStatus(`action failed: ${actionLabels[action]} / ${String(error)}`);
+        const nextStatus = `action failed: ${actionLabels[action]} / ${String(error)}`;
+        setStatus(nextStatus);
+        appendActivityLog(nextStatus);
       } finally {
         setActionRunning(false);
       }
     },
     [
+      appendActivityLog,
       isActionRunning,
       isAnalyzing,
       query,
@@ -459,11 +499,11 @@ export function App() {
     async (account: MailAccount) => {
       setAccounts((current) => [account, ...current.filter((item) => item.id !== account.id)]);
       setSelectedAccountId(account.id);
-      setStatus(
-        account.sync_enabled
-          ? `account configuration saved, initial sync starting: ${account.email}`
-          : `account configuration saved: ${account.email}`
-      );
+      const saveStatus = account.sync_enabled
+        ? `account configuration saved, initial sync starting: ${account.email}`
+        : `account configuration saved: ${account.email}`;
+      setStatus(saveStatus);
+      appendActivityLog(saveStatus);
       const nextStatus = await runInitialAccountSync({
         accountId: account.id,
         email: account.email,
@@ -478,12 +518,14 @@ export function App() {
         refreshAudits
       });
       setStatus(nextStatus);
+      appendActivityLog(nextStatus);
     },
-    [query, refreshAudits, refreshFolders, refreshMessages, refreshSyncState]
+    [appendActivityLog, query, refreshAudits, refreshFolders, refreshMessages, refreshSyncState]
   );
 
   const handleSent = useCallback(
     async (draft: SendMessageDraft) => {
+      appendActivityLog(`send started: ${draft.to.join(", ") || "no recipients"}`);
       const result = await runDirectSendFlow({
         draft,
         selectedFolderId,
@@ -494,12 +536,13 @@ export function App() {
         refreshAudits
       });
       setStatus(result.status);
+      appendActivityLog(result.status);
       if (!result.ok) {
         throw result.error;
       }
       setComposerOpen(false);
     },
-    [query, refreshAudits, refreshFolders, refreshMessages, selectedFolderId]
+    [appendActivityLog, query, refreshAudits, refreshFolders, refreshMessages, selectedFolderId]
   );
 
   const handleAnalyze = useCallback(async () => {
@@ -507,6 +550,7 @@ export function App() {
     const messageId = selectedMessageId;
     setAnalyzing(true);
     setAiStatus("ai analysis running");
+    appendActivityLog(`ai analysis started: ${messageId}`);
     try {
       await api.runAiAnalysis(messageId);
       if (selectedMessageIdRef.current !== messageId) return;
@@ -514,12 +558,17 @@ export function App() {
       if (selectedMessageIdRef.current !== messageId) return;
       setAiInsights(insights);
       setAiStatus("ai analysis complete");
+      appendActivityLog(`ai analysis complete: ${messageId}`);
     } catch (error) {
-      if (selectedMessageIdRef.current === messageId) setAiStatus(`ai analysis failed: ${String(error)}`);
+      if (selectedMessageIdRef.current === messageId) {
+        const nextStatus = `ai analysis failed: ${String(error)}`;
+        setAiStatus(nextStatus);
+        appendActivityLog(nextStatus);
+      }
     } finally {
       setAnalyzing(false);
     }
-  }, [isActionRunning, selectedMessageId]);
+  }, [appendActivityLog, isActionRunning, selectedMessageId]);
 
   const measureWorkspaceAvailableWidth = useCallback(() => {
     const workspace = mailWorkspaceRef.current;
@@ -626,6 +675,7 @@ export function App() {
     100 - workspaceSplitModel.percent
   )} percent`;
   const manualSyncButton = getManualSyncButtonState(selectedAccountId, isManualSyncing);
+  const activityLogText = buildActivityLogText(activityLogEntries);
 
   return (
     <main className={getAppShellClassName(showActivityLog)}>
@@ -829,10 +879,13 @@ export function App() {
         <footer className="status-console">
           <section className="console-panel audit-feed">
             <header>AUDIT / ACTIVITY LOG</header>
-            <p>{accountSyncState?.error_message ?? status}</p>
-            {audits.slice(0, 8).map((audit) => (
-              <code key={audit.id}>{formatAuditLine(audit)}</code>
-            ))}
+            <textarea
+              aria-label="Activity log history"
+              className="activity-log-textbox"
+              placeholder="No session activity yet."
+              readOnly
+              value={activityLogText}
+            />
           </section>
         </footer>
       ) : null}

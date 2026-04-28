@@ -33,6 +33,10 @@ function firstRejectedReason(results: PromiseSettledResult<unknown>[]) {
   return results.find((result): result is PromiseRejectedResult => result.status === "rejected")?.reason;
 }
 
+function appendWatcherWarning(status: string, watcherError: unknown) {
+  return watcherError ? `${status} / watcher start failed: ${String(watcherError)}` : status;
+}
+
 export async function runDirectSendFlow({
   draft,
   selectedFolderId,
@@ -109,6 +113,7 @@ export async function runInitialAccountSync({
 
   let summary: SyncSummary | null = null;
   let syncError: unknown = null;
+  let watcherError: unknown = null;
 
   try {
     summary = await syncAccount(accountId);
@@ -117,7 +122,9 @@ export async function runInitialAccountSync({
   }
 
   if (summary && startAccountWatchers) {
-    await startAccountWatchers(accountId).catch(() => undefined);
+    await startAccountWatchers(accountId).catch((error) => {
+      watcherError = error;
+    });
   }
 
   await Promise.allSettled([
@@ -128,7 +135,10 @@ export async function runInitialAccountSync({
   ]);
 
   if (summary) {
-    return `account saved and initial sync complete: ${email} / ${summary.folders} folders / ${summary.messages} messages`;
+    return appendWatcherWarning(
+      `account saved and initial sync complete: ${email} / ${summary.folders} folders / ${summary.messages} messages`,
+      watcherError
+    );
   }
   return `account saved, but initial sync failed: ${String(syncError)}`;
 }
@@ -191,8 +201,11 @@ export async function runManualAccountSync({
   refreshAudits
 }: ManualAccountSyncRequest) {
   const summary = await syncAccount(accountId);
+  let watcherError: unknown = null;
   if (startAccountWatchers) {
-    await startAccountWatchers(accountId).catch(() => undefined);
+    await startAccountWatchers(accountId).catch((error) => {
+      watcherError = error;
+    });
   }
   await Promise.allSettled([
     refreshFolders(accountId),
@@ -200,5 +213,5 @@ export async function runManualAccountSync({
     refreshSyncState(accountId),
     refreshAudits()
   ]);
-  return `sync complete: ${summary.folders} folders / ${summary.messages} messages`;
+  return appendWatcherWarning(`sync complete: ${summary.folders} folders / ${summary.messages} messages`, watcherError);
 }
