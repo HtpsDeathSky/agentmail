@@ -1,6 +1,6 @@
 # Next Steps
 
-Last updated: 2026-04-27
+Last updated: 2026-04-28
 
 ## Immediate Windows Validation
 
@@ -13,13 +13,13 @@ Last updated: 2026-04-27
 - [ ] Open several folders and confirm message lists are folder-specific.
 - [ ] Configure an HTTPS OpenAI-compatible AI endpoint from the unified configuration UI.
 - [ ] Analyze one non-sensitive test message and confirm the summary is concise Simplified Chinese.
-- [ ] Compose a message and confirm it appears in `PENDING ACTIONS`.
-- [ ] Confirm the pending send and verify delivery.
+- [ ] Compose a message and confirm it is sent directly.
+- [ ] Verify the delivered message appears in Sent locally after successful send.
 
 ## High-Priority Product Improvements
 
 - Improve send failure visibility.
-  - Show the SMTP error from `confirm failed: ...` in a clearer place near pending actions or the audit log.
+  - Show SMTP send failures clearly in main status text and the optional activity log.
   - Acceptance: a failed send tells the user whether the failure is address parsing, authentication, connection, TLS, or provider rejection when available.
 
 - Add project status update discipline.

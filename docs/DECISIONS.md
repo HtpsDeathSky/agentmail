@@ -1,6 +1,6 @@
 # Project Decisions
 
-Last updated: 2026-04-27
+Last updated: 2026-04-28
 
 ## Product Decisions
 
@@ -11,6 +11,7 @@ Last updated: 2026-04-27
 - Manual AI click is treated as user consent to send that message content to the configured remote model.
 - Do not implement local sensitivity auditing in the MVP.
 - AI output should be concise Simplified Chinese by default.
+- Keep the activity log available, but hide it by default and expose it through display settings.
 
 ## Technical Decisions
 
@@ -22,7 +23,7 @@ Last updated: 2026-04-27
 - Do not return the full AI API key to the UI after saving; return only a mask.
 - Store mailbox IMAP/SMTP passwords plaintext in SQLite for this MVP.
 - Do not use Windows Credential Manager or secret-store fallback for mailbox passwords.
-- SMTP send must enter `PENDING ACTIONS` first and execute only after explicit confirmation.
+- SMTP send executes directly after compose submit; no extra pending-action confirmation is required.
 - Windows app should not show an extra terminal window in dev/debug/release app binaries.
 - GitHub Actions builds Windows release bundles from `main`.
 

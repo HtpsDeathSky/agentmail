@@ -11,9 +11,9 @@ Windows-first desktop mail client MVP built with Tauri v2, Rust, React/Vite, and
 - All selectable IMAP folders sync through UID search/fetch with per-folder sync state, MIME parsing,正文文本存储, and attachment metadata indexing without downloading attachment files.
 - SMTP send through `lettre`; port `465` uses implicit TLS and port `587` uses STARTTLS.
 - Account-level sync locking plus per-folder failure counts and short exponential backoff after sync failures.
-- Pending action queue for high-risk actions. SMTP send is queued first and only executes after explicit confirmation.
+- Mail actions and SMTP sends execute directly from the UI; action history is recorded in the audit log.
 - Tauri startup triggers background sync for accounts with `sync_enabled=true`.
-- Desktop UI shell with account/folder rail, message list, detail pane, compose modal, unified configuration modal, search, sync controls, and bottom operations console.
+- Desktop UI shell with account/folder rail, message list, detail pane, compose modal, unified configuration modal, search, topbar sync controls, and an optional activity log footer.
 - AI analysis is manual only for the selected message. The remote provider must expose an HTTPS OpenAI-compatible API.
 - AI summaries are prompted to be concise Simplified Chinese.
 - AI API keys are stored plaintext in SQLite for this MVP. After save, the full key is not returned to the UI.

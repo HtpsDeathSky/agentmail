@@ -1,13 +1,13 @@
 # Project Status
 
-Last updated: 2026-04-27
+Last updated: 2026-04-28
 
 ## Current Source of Truth
 
 - Repository: `HtpsDeathSky/agentmail`
 - Branch: `main`
-- Current HEAD: `e1816ed docs: add project handoff memory`
-- Current working tree: unified configuration and SQLite-only mailbox password storage changes are in progress and not yet committed.
+- Direct-actions cleanup is implemented on `main` through `2799125 feat: align demo with direct send`; this document update follows that work.
+- Current working tree: run `git status --short` in the active checkout before starting new work.
 - Local working tree note: `.codex` may appear as an untracked local directory; do not treat it as project state and do not commit it.
 - Use this file with `docs/DECISIONS.md`, `docs/NEXT_STEPS.md`, and `docs/REAL_MAIL_ACCEPTANCE.md` as the cross-session handoff memory.
 - `docs/superpowers/*` contains historical Superpowers plugin outputs. It is useful for traceability but is not the current status source.
@@ -21,7 +21,7 @@ The user flow is:
 1. Add an IMAP/SMTP mailbox manually.
 2. Sync selectable folders and messages into local SQLite.
 3. Read, search, and manage messages in the desktop app.
-4. Compose mail; sending enters `PENDING ACTIONS` and executes only after explicit confirmation.
+4. Compose mail; sending executes directly through SMTP and records an audit entry.
 5. Manually analyze a selected message through an HTTPS OpenAI-compatible remote API.
 6. Save AI summary, category, priority, todos, and reply draft locally.
 
@@ -29,13 +29,14 @@ The user flow is:
 
 - Windows desktop shell with Tauri v2, Rust workspace, React/Vite UI, and SQLite.
 - Unified configuration UI for editable IMAP/SMTP account setup with connection testing.
-- SQLite-backed accounts, folders, messages, sync state, FTS5 search, pending actions, action audits, AI settings, and AI insights.
+- SQLite-backed accounts, folders, messages, sync state, FTS5 search, action audits, AI settings, and AI insights.
 - IMAP/SMTP account passwords are stored plaintext in SQLite for this MVP.
 - Live IMAP folder discovery and per-folder UID-based message sync.
 - MIME parsing with body text storage and attachment metadata indexing; attachment files are not downloaded.
-- Folder counts are refreshed from locally stored messages after sync and confirmed actions.
+- Folder counts are refreshed from locally stored messages after sync and direct actions.
 - SMTP sending uses `lettre`; port `465` uses implicit TLS and port `587` uses STARTTLS.
-- SMTP send is queued first and only executes after user confirmation in `PENDING ACTIONS`.
+- SMTP send executes directly from the compose flow and records executed or failed audit entries.
+- `AUDIT / ACTIVITY LOG` is hidden by default and can be shown from the `DISPLAY` settings tab.
 - Tauri startup triggers background sync for accounts with `sync_enabled=true`.
 - Manual remote AI analysis for the selected message only.
 - AI provider is OpenAI-compatible over HTTPS.
@@ -52,20 +53,20 @@ The user flow is:
 - Mailbox passwords are stored plaintext in SQLite. Windows Credential Manager is no longer used.
 - OAuth is not implemented; use provider app passwords where required.
 - Attachment files are not downloaded yet.
-- Permanent delete is intentionally disabled.
+- Permanent delete is limited to messages already in Trash and should be tested only with disposable mail.
 - Move/archive backend support exists, but not all controls are exposed in the current UI.
 - No tray mode, notifications, contacts, rules, calendar, templates, or multi-window support yet.
 
 ## Recent Verification
 
-For the current working tree, the following local checks were run on 2026-04-27:
+For the direct-actions cleanup, the following checks were run on 2026-04-28:
 
 - `cargo fmt --all --check`
 - `pnpm test`
 - `pnpm rust:test`
 - `pnpm rust:check`
 - `pnpm build`
-- Browser smoke check through Playwright against `pnpm dev -- --host 127.0.0.1`
+- Browser smoke check against `pnpm dev -- --host 127.0.0.1`
 
 Environment caveat:
 
