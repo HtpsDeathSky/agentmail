@@ -158,6 +158,37 @@ describe("api demo AI bindings", () => {
     expect((await api.getAuditLog(1))[0].id).toBe(latestAuditBefore.id);
   });
 
+  it("rejects direct sends with only blank recipients before Sent mutation or audit in the browser demo", async () => {
+    const account = await api.saveAccountConfig({
+      id: null,
+      display_name: "Blank Recipient Demo",
+      email: "blank-recipient-demo@example.com",
+      password: "plain-mail-secret",
+      imap_host: "imap.blank-recipient.example.com",
+      imap_port: 993,
+      imap_tls: true,
+      smtp_host: "smtp.blank-recipient.example.com",
+      smtp_port: 465,
+      smtp_tls: true,
+      sync_enabled: true
+    });
+    const latestAuditBefore = (await api.getAuditLog(1))[0];
+
+    await expect(
+      api.sendMessage({
+        account_id: account.id,
+        to: ["  ", ""],
+        cc: ["   "],
+        subject: "Blank recipients",
+        body: "This should not create Sent mail."
+      })
+    ).rejects.toThrow("recipient list is empty");
+
+    const sentFolder = (await api.listFolders(account.id)).find((folder) => folder.account_id === account.id && folder.role === "sent");
+    expect(sentFolder).toBeUndefined();
+    expect((await api.getAuditLog(1))[0].id).toBe(latestAuditBefore.id);
+  });
+
   it("records multi-message move actions as batch_move in the browser demo", async () => {
     const folders = await api.listFolders("demo-account");
     const archiveFolder = folders.find((folder) => folder.account_id === "demo-account" && folder.role === "archive");

@@ -511,7 +511,7 @@ impl MailProtocol for MockMailProtocol {
                 "2001",
                 "Sent: rotation confirmation",
                 account.email.as_str(),
-                "Confirmation sent through the pending action queue.",
+                "Confirmation sent directly through SMTP.",
                 true,
                 false,
             )],

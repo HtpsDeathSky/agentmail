@@ -6,7 +6,7 @@ Last updated: 2026-04-28
 
 - Repository: `HtpsDeathSky/agentmail`
 - Branch: `main`
-- Direct-actions cleanup is implemented on `main` through `2799125 feat: align demo with direct send`; this document update follows that work.
+- Direct-actions cleanup is implemented on `main`; this status includes direct-send result hardening and browser-demo parity fixes from the 2026-04-28 direct-actions series.
 - Current working tree: run `git status --short` in the active checkout before starting new work.
 - Local working tree note: `.codex` may appear as an untracked local directory; do not treat it as project state and do not commit it.
 - Use this file with `docs/DECISIONS.md`, `docs/NEXT_STEPS.md`, and `docs/REAL_MAIL_ACCEPTANCE.md` as the cross-session handoff memory.
@@ -62,10 +62,11 @@ The user flow is:
 For the direct-actions cleanup, the following checks were run on 2026-04-28:
 
 - `cargo fmt --all --check`
+- `git diff --check`
+- `cargo test -p mail-core -p mail-store -p mail-protocol -p ai-remote -p app-api`
 - `pnpm test`
-- `pnpm rust:test`
-- `pnpm rust:check`
 - `pnpm build`
+- `pnpm rust:check`
 - Browser smoke check against `pnpm dev -- --host 127.0.0.1`
 
 Environment caveat:

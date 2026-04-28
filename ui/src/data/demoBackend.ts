@@ -21,6 +21,10 @@ import type {
 
 const now = () => new Date().toISOString();
 
+function normalizeAddressList(addresses: string[]) {
+  return addresses.map((address) => address.trim()).filter(Boolean);
+}
+
 const account: MailAccount = {
   id: "demo-account",
   display_name: "Operations Mail",
@@ -429,7 +433,9 @@ export const demoBackend = {
         const incomingDraft = args?.draft as SendMessageDraft;
         const draftAccount = accounts.find((item) => item.id === incomingDraft.account_id);
         if (!draftAccount) throw new Error("account not found");
-        if (incomingDraft.to.length === 0) throw new Error("recipient list is empty");
+        const to = normalizeAddressList(incomingDraft.to);
+        if (to.length === 0) throw new Error("recipient list is empty");
+        const cc = normalizeAddressList(incomingDraft.cc);
         let sentFolder =
           folders.find((folder) => folder.account_id === incomingDraft.account_id && folder.role === "sent") ??
           folders.find((folder) => folder.account_id === incomingDraft.account_id && isSentFolderPath(folder.path));
@@ -449,7 +455,7 @@ export const demoBackend = {
         }
         const messageId = crypto.randomUUID();
         const messageIdHeader = incomingDraft.message_id_header ?? `<${messageId}@agentmail.local>`;
-        const draft: SendMessageDraft = { ...incomingDraft, message_id_header: messageIdHeader };
+        const draft: SendMessageDraft = { ...incomingDraft, to, cc, message_id_header: messageIdHeader };
         const bodyPreview = draft.body.trim() || "(empty message)";
         messages = [
           {
