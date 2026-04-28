@@ -49,6 +49,11 @@ pub struct AppApi {
     sync_locks: Arc<Mutex<HashSet<String>>>,
 }
 
+struct FolderSyncOutcome {
+    message_count: u32,
+    last_uid: Option<String>,
+}
+
 impl AppApi {
     pub fn new(store: MailStore, protocol: Arc<dyn MailProtocol>) -> Self {
         Self::new_with_ai_provider(
@@ -261,6 +266,58 @@ impl AppApi {
         }
     }
 
+    pub async fn sync_folder(
+        &self,
+        account_id: String,
+        folder_id: String,
+    ) -> ApiResult<SyncSummary> {
+        let _guard = self.acquire_sync_lock(&account_id)?;
+        let account = self.store.get_account(&account_id)?;
+        if !account.sync_enabled {
+            return Err(ApiError::InvalidRequest(
+                "sync is disabled for account".to_string(),
+            ));
+        }
+
+        let folder = self.store.get_folder(&folder_id)?;
+        if folder.account_id != account.id {
+            return Err(ApiError::InvalidRequest(
+                "folder belongs to a different account".to_string(),
+            ));
+        }
+
+        let previous_state = self.store.get_sync_state(&account.id, Some(&folder.id))?;
+        if let Some(backoff_until) = previous_state
+            .as_ref()
+            .and_then(|state| state.backoff_until.as_deref())
+        {
+            if matches!(
+                previous_state.as_ref().map(|state| state.state),
+                Some(SyncStateKind::Backoff)
+            ) && timestamp_is_future(backoff_until)
+            {
+                return Err(ApiError::SyncBackoff {
+                    account_id: account.id,
+                    backoff_until: backoff_until.to_string(),
+                });
+            }
+        }
+
+        if folder.role == FolderRole::Sent {
+            self.converge_fallback_sent_placeholders(&account.id, &folder)?;
+        }
+
+        let settings = self.connection_settings_for_account(&account)?;
+        let outcome = self.sync_one_folder(&settings, &account, &folder).await?;
+        Ok(SyncSummary {
+            account_id: account.id,
+            folders: 1,
+            messages: outcome.message_count,
+            last_uid: outcome.last_uid,
+            synced_at: now_rfc3339(),
+        })
+    }
+
     async fn sync_account_inner(&self, account: &MailAccount) -> ApiResult<SyncSummary> {
         let settings = self.connection_settings_for_account(account)?;
         let folders = self.protocol.fetch_folders(&settings, account).await?;
@@ -290,84 +347,20 @@ impl AppApi {
             }
 
             attempted_folders += 1;
-            self.store.save_sync_state(&SyncState {
-                account_id: account.id.clone(),
-                folder_id: Some(folder.id.clone()),
-                state: SyncStateKind::Syncing,
-                last_uid: previous_state
-                    .as_ref()
-                    .and_then(|state| state.last_uid.clone()),
-                last_synced_at: None,
-                error_message: None,
-                backoff_until: None,
-                failure_count: previous_state
-                    .as_ref()
-                    .map(|state| state.failure_count)
-                    .unwrap_or(0),
-            })?;
-
-            let previous_last_uid = previous_state.and_then(|state| state.last_uid);
-            let fetch_request = MessageFetchRequest {
-                last_uid: None,
-                limit: u32::MAX,
-            };
-            let messages_result = self
-                .protocol
-                .fetch_messages(&settings, account, folder, &fetch_request)
-                .await;
-            let messages = match messages_result {
-                Ok(messages) => messages,
-                Err(err) => {
-                    let failure_count = self
-                        .store
-                        .get_sync_state(&account.id, Some(&folder.id))?
-                        .map(|state| state.failure_count)
-                        .unwrap_or(0)
-                        .saturating_add(1);
-                    self.store.save_sync_state(&SyncState {
-                        account_id: account.id.clone(),
-                        folder_id: Some(folder.id.clone()),
-                        state: SyncStateKind::Backoff,
-                        last_uid: previous_last_uid,
-                        last_synced_at: None,
-                        error_message: Some(err.to_string()),
-                        backoff_until: Some(now_plus_seconds_rfc3339(backoff_seconds(
-                            failure_count,
-                        ))),
-                        failure_count,
-                    })?;
+            match self.sync_one_folder(&settings, account, folder).await {
+                Ok(outcome) => {
+                    message_count += outcome.message_count;
+                    last_uid = outcome.last_uid.or(last_uid);
+                    successful_folders += 1;
+                }
+                Err(ApiError::Protocol(err)) => {
                     if first_folder_error.is_none() {
                         first_folder_error = Some(ApiError::Protocol(err));
                     }
                     continue;
                 }
-            };
-            let mut folder_last_uid = None;
-            let mut remote_uids = HashSet::new();
-            for message in messages {
-                folder_last_uid = message.uid.clone().or(folder_last_uid);
-                if let Some(uid) = message.uid.as_ref() {
-                    remote_uids.insert(uid.clone());
-                }
-                self.store.upsert_message(&message)?;
-                message_count += 1;
+                Err(err) => return Err(err),
             }
-            self.store
-                .reconcile_folder_remote_uids(&account.id, &folder.id, &remote_uids)?;
-            self.store.refresh_folder_counts(&folder.id)?;
-            last_uid = folder_last_uid.clone().or(last_uid);
-            successful_folders += 1;
-
-            self.store.save_sync_state(&SyncState {
-                account_id: account.id.clone(),
-                folder_id: Some(folder.id.clone()),
-                state: SyncStateKind::Idle,
-                last_uid: folder_last_uid,
-                last_synced_at: Some(now_rfc3339()),
-                error_message: None,
-                backoff_until: None,
-                failure_count: 0,
-            })?;
         }
 
         if attempted_folders > 0 && successful_folders == 0 {
@@ -382,6 +375,93 @@ impl AppApi {
             messages: message_count,
             last_uid,
             synced_at: now_rfc3339(),
+        })
+    }
+
+    async fn sync_one_folder(
+        &self,
+        settings: &ConnectionSettings,
+        account: &MailAccount,
+        folder: &MailFolder,
+    ) -> ApiResult<FolderSyncOutcome> {
+        let previous_state = self.store.get_sync_state(&account.id, Some(&folder.id))?;
+        self.store.save_sync_state(&SyncState {
+            account_id: account.id.clone(),
+            folder_id: Some(folder.id.clone()),
+            state: SyncStateKind::Syncing,
+            last_uid: previous_state
+                .as_ref()
+                .and_then(|state| state.last_uid.clone()),
+            last_synced_at: None,
+            error_message: None,
+            backoff_until: None,
+            failure_count: previous_state
+                .as_ref()
+                .map(|state| state.failure_count)
+                .unwrap_or(0),
+        })?;
+
+        let previous_last_uid = previous_state.and_then(|state| state.last_uid);
+        let fetch_request = MessageFetchRequest {
+            last_uid: None,
+            limit: u32::MAX,
+        };
+        let messages_result = self
+            .protocol
+            .fetch_messages(settings, account, folder, &fetch_request)
+            .await;
+        let messages = match messages_result {
+            Ok(messages) => messages,
+            Err(err) => {
+                let failure_count = self
+                    .store
+                    .get_sync_state(&account.id, Some(&folder.id))?
+                    .map(|state| state.failure_count)
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                self.store.save_sync_state(&SyncState {
+                    account_id: account.id.clone(),
+                    folder_id: Some(folder.id.clone()),
+                    state: SyncStateKind::Backoff,
+                    last_uid: previous_last_uid,
+                    last_synced_at: None,
+                    error_message: Some(err.to_string()),
+                    backoff_until: Some(now_plus_seconds_rfc3339(backoff_seconds(failure_count))),
+                    failure_count,
+                })?;
+                return Err(ApiError::Protocol(err));
+            }
+        };
+
+        let mut message_count = 0_u32;
+        let mut folder_last_uid = None;
+        let mut remote_uids = HashSet::new();
+        for message in messages {
+            folder_last_uid = message.uid.clone().or(folder_last_uid);
+            if let Some(uid) = message.uid.as_ref() {
+                remote_uids.insert(uid.clone());
+            }
+            self.store.upsert_message(&message)?;
+            message_count += 1;
+        }
+        self.store
+            .reconcile_folder_remote_uids(&account.id, &folder.id, &remote_uids)?;
+        self.store.refresh_folder_counts(&folder.id)?;
+
+        self.store.save_sync_state(&SyncState {
+            account_id: account.id.clone(),
+            folder_id: Some(folder.id.clone()),
+            state: SyncStateKind::Idle,
+            last_uid: folder_last_uid.clone(),
+            last_synced_at: Some(now_rfc3339()),
+            error_message: None,
+            backoff_until: None,
+            failure_count: 0,
+        })?;
+
+        Ok(FolderSyncOutcome {
+            message_count,
+            last_uid: folder_last_uid,
         })
     }
 
@@ -2231,6 +2311,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_folder_fetches_only_the_target_folder() {
+        let protocol = FolderScopedSyncProtocol::new();
+        let requests = Arc::clone(&protocol.requests);
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        api.sync_account(account.id.clone()).await.unwrap();
+        requests.lock().clear();
+
+        let archive = api
+            .store
+            .find_folder_by_role(&account.id, FolderRole::Archive)
+            .unwrap()
+            .unwrap();
+        let summary = api
+            .sync_folder(account.id.clone(), archive.id.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(summary.account_id, account.id);
+        assert_eq!(summary.folders, 1);
+        assert_eq!(requests.lock().clone(), vec![archive.id.clone()]);
+        let state = api
+            .store
+            .get_sync_state(&account.id, Some(&archive.id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.state, SyncStateKind::Idle);
+        assert_eq!(api.store.get_folder(&archive.id).unwrap().total_count, 1);
+    }
+
+    #[tokio::test]
+    async fn sync_folder_rejects_folder_from_another_account() {
+        let api = AppApi::new(
+            MailStore::memory().unwrap(),
+            Arc::new(FolderScopedSyncProtocol::new()),
+        );
+        let first = add_sample_account(&api).await;
+        let second = api
+            .save_account_config(SaveAccountConfigRequest {
+                id: None,
+                display_name: "Other".to_string(),
+                email: "other@example.com".to_string(),
+                password: "secret".to_string(),
+                imap_host: "imap.example.com".to_string(),
+                imap_port: 993,
+                imap_tls: true,
+                smtp_host: "smtp.example.com".to_string(),
+                smtp_port: 465,
+                smtp_tls: true,
+                sync_enabled: true,
+            })
+            .await
+            .unwrap();
+        api.sync_account(first.id.clone()).await.unwrap();
+        let inbox = api
+            .store
+            .find_folder_by_role(&first.id, FolderRole::Inbox)
+            .unwrap()
+            .unwrap();
+
+        let error = api.sync_folder(second.id, inbox.id).await.unwrap_err();
+
+        assert!(matches!(error, ApiError::InvalidRequest(_)));
+    }
+
+    #[tokio::test]
     async fn account_sync_uses_full_folder_snapshot_after_initial_sync() {
         let protocol = SnapshotSyncProtocol::new(vec!["42"]);
         let requests = Arc::clone(&protocol.requests);
@@ -3348,6 +3494,18 @@ mod tests {
         requests: Arc<Mutex<Vec<MessageFetchRequest>>>,
     }
 
+    struct FolderScopedSyncProtocol {
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl FolderScopedSyncProtocol {
+        fn new() -> Self {
+            Self {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
     impl SnapshotSyncProtocol {
         fn new(uids: Vec<&str>) -> Self {
             Self {
@@ -3389,6 +3547,97 @@ mod tests {
             _request: &MessageFetchRequest,
         ) -> ProtocolResult<Vec<MailMessage>> {
             Ok(Vec::new())
+        }
+
+        async fn send_message(
+            &self,
+            _settings: &ConnectionSettings,
+            _draft: &SendMessageDraft,
+        ) -> ProtocolResult<String> {
+            Ok(new_id())
+        }
+
+        async fn apply_action(
+            &self,
+            _settings: &ConnectionSettings,
+            _account: &MailAccount,
+            _action: &RemoteMailAction,
+        ) -> ProtocolResult<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl MailProtocol for FolderScopedSyncProtocol {
+        async fn test_connection(
+            &self,
+            _settings: &ConnectionSettings,
+        ) -> ProtocolResult<ConnectionTestResult> {
+            Ok(ConnectionTestResult {
+                imap_ok: true,
+                smtp_ok: true,
+                message: "ok".to_string(),
+            })
+        }
+
+        async fn fetch_folders(
+            &self,
+            _settings: &ConnectionSettings,
+            account: &MailAccount,
+        ) -> ProtocolResult<Vec<MailFolder>> {
+            Ok(vec![
+                MailFolder {
+                    id: format!("{}:inbox", account.id),
+                    account_id: account.id.clone(),
+                    name: "INBOX".to_string(),
+                    path: "INBOX".to_string(),
+                    role: FolderRole::Inbox,
+                    unread_count: 0,
+                    total_count: 0,
+                },
+                MailFolder {
+                    id: format!("{}:archive", account.id),
+                    account_id: account.id.clone(),
+                    name: "Archive".to_string(),
+                    path: "Archive".to_string(),
+                    role: FolderRole::Archive,
+                    unread_count: 0,
+                    total_count: 0,
+                },
+            ])
+        }
+
+        async fn fetch_messages(
+            &self,
+            _settings: &ConnectionSettings,
+            account: &MailAccount,
+            folder: &MailFolder,
+            _request: &MessageFetchRequest,
+        ) -> ProtocolResult<Vec<MailMessage>> {
+            self.requests.lock().push(folder.id.clone());
+            Ok(vec![MailMessage {
+                id: format!("{}:{}:uid-1", account.id, folder.id),
+                account_id: account.id.clone(),
+                folder_id: folder.id.clone(),
+                uid: Some("1".to_string()),
+                message_id_header: Some(format!("<{}-uid-1@example.com>", folder.id)),
+                subject: format!("{} update", folder.name),
+                sender: "ops@example.com".to_string(),
+                recipients: vec![account.email.clone()],
+                cc: Vec::new(),
+                received_at: now_rfc3339(),
+                body_preview: "body".to_string(),
+                body: Some("body".to_string()),
+                attachments: Vec::new(),
+                flags: mail_core::MessageFlags {
+                    is_read: false,
+                    is_starred: false,
+                    is_answered: false,
+                    is_forwarded: false,
+                },
+                size_bytes: Some(128),
+                deleted_at: None,
+            }])
         }
 
         async fn send_message(
