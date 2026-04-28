@@ -167,51 +167,6 @@ export async function refreshAfterMailSyncEvent({
   return true;
 }
 
-export type AutomaticAccountSyncRequest = {
-  selectedAccountId: string | null;
-  selectedFolderId: string | null;
-  query: string;
-  syncEnabled?: boolean;
-  syncAccount: (accountId: string) => Promise<SyncSummary>;
-  startAccountWatchers?: (accountId: string) => Promise<unknown>;
-  refreshFolders: (accountId: string) => Promise<void>;
-  refreshMessages: (accountId: string, folderId: string | null, query: string) => Promise<void>;
-  refreshSyncState: (accountId: string) => Promise<void>;
-  refreshAudits: () => Promise<void>;
-};
-
-export async function runAutomaticAccountSync({
-  selectedAccountId,
-  selectedFolderId,
-  query,
-  syncEnabled = true,
-  syncAccount,
-  startAccountWatchers,
-  refreshFolders,
-  refreshMessages,
-  refreshSyncState,
-  refreshAudits
-}: AutomaticAccountSyncRequest) {
-  if (!selectedAccountId || !syncEnabled) {
-    return { refreshed: false, status: null };
-  }
-
-  const summary = await syncAccount(selectedAccountId);
-  if (startAccountWatchers) {
-    await startAccountWatchers(selectedAccountId).catch(() => undefined);
-  }
-  await Promise.allSettled([
-    refreshFolders(selectedAccountId),
-    refreshMessages(selectedAccountId, selectedFolderId, query),
-    refreshSyncState(selectedAccountId),
-    refreshAudits()
-  ]);
-  return {
-    refreshed: true,
-    status: `auto sync complete: ${summary.folders} folders / ${summary.messages} messages`
-  };
-}
-
 export type ManualAccountSyncRequest = {
   accountId: string;
   folderId: string | null;

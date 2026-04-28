@@ -65,7 +65,6 @@ import { actionLabels } from "./lib/mailActions";
 import { formatAuditLine, formatFolderCount, formatSize, formatTime } from "./lib/format";
 import {
   refreshAfterMailSyncEvent,
-  runAutomaticAccountSync,
   runDirectSendFlow,
   runInitialAccountSync,
   runManualAccountSync,
@@ -87,7 +86,6 @@ const defaultAccountConfigForm: SaveAccountConfigRequest = {
 };
 
 export const MAIL_SYNC_EVENT = "agentmail-mail-sync";
-export const AUTO_SYNC_INTERVAL_MS = 30_000;
 const WORKSPACE_LIST_MIN_WIDTH = 320;
 const WORKSPACE_DETAIL_MIN_WIDTH = 420;
 const WORKSPACE_DIVIDER_WIDTH = 8;
@@ -174,7 +172,6 @@ export function App() {
   const selectedAccountSyncEnabledRef = useRef(true);
   const selectedFolderIdRef = useRef<string | null>(null);
   const selectedMessageIdRef = useRef<string | null>(null);
-  const isAutoSyncRunningRef = useRef(false);
   const queryRef = useRef("");
 
   useEffect(() => {
@@ -344,35 +341,6 @@ export function App() {
       isCancelled = true;
       unlisten?.();
     };
-  }, [refreshAudits, refreshFolders, refreshMessages, refreshSyncState]);
-
-  useEffect(() => {
-    const runAutoSync = () => {
-      if (isAutoSyncRunningRef.current) return;
-      isAutoSyncRunningRef.current = true;
-      void runAutomaticAccountSync({
-        selectedAccountId: selectedAccountIdRef.current,
-        selectedFolderId: selectedFolderIdRef.current,
-        query: queryRef.current,
-        syncEnabled: selectedAccountSyncEnabledRef.current,
-        syncAccount: api.syncAccount,
-        startAccountWatchers: api.startAccountWatchers,
-        refreshFolders,
-        refreshMessages,
-        refreshSyncState,
-        refreshAudits
-      })
-        .then((result) => {
-          if (result.status) setStatus(result.status);
-        })
-        .catch((error) => setStatus(`auto sync failed: ${String(error)}`))
-        .finally(() => {
-          isAutoSyncRunningRef.current = false;
-        });
-    };
-
-    const intervalId = window.setInterval(runAutoSync, AUTO_SYNC_INTERVAL_MS);
-    return () => window.clearInterval(intervalId);
   }, [refreshAudits, refreshFolders, refreshMessages, refreshSyncState]);
 
   useEffect(() => {
