@@ -443,7 +443,7 @@ button {
   flex: 0 1 var(--workspace-list-percent, 45%);
   min-height: 0;
   min-width: 320px;
-  border-right: 1px solid var(--color-border);
+  border-right: 0;
 }
 
 .column-header {
@@ -476,8 +476,6 @@ button {
   position: relative;
   flex: 0 0 8px;
   min-height: 0;
-  border-right: 1px solid var(--color-border);
-  border-left: 1px solid var(--color-border);
   background: var(--color-panel-bg);
   cursor: col-resize;
   touch-action: none;
@@ -485,9 +483,13 @@ button {
 
 .workspace-divider::before {
   position: absolute;
-  inset: 0 3px;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
   content: "";
   background: var(--color-border-soft);
+  transform: translateX(-50%);
 }
 
 .workspace-divider:hover::before,

@@ -3,6 +3,7 @@
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use app_api::{
@@ -18,6 +19,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const MAIL_SYNC_EVENT: &str = "agentmail-mail-sync";
+const WATCHER_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 struct ApiState {
     api: Arc<AppApi>,
@@ -323,8 +325,8 @@ fn start_folder_watcher(
                         }
                         Err(ApiError::SyncAlreadyRunning(_)) => {}
                         Err(_) => {
-                            remove_watcher(&registry, &account_id, &folder_id);
-                            return;
+                            tokio::time::sleep(WATCHER_RETRY_DELAY).await;
+                            continue;
                         }
                     }
                     if start_account_watchers_for_api(
@@ -335,14 +337,14 @@ fn start_folder_watcher(
                     )
                     .is_err()
                     {
-                        remove_watcher(&registry, &account_id, &folder_id);
-                        return;
+                        tokio::time::sleep(WATCHER_RETRY_DELAY).await;
+                        continue;
                     }
                 }
                 Ok(mail_core::FolderWatchOutcome::Timeout) => {}
                 Err(_) => {
-                    remove_watcher(&registry, &account_id, &folder_id);
-                    return;
+                    tokio::time::sleep(WATCHER_RETRY_DELAY).await;
+                    continue;
                 }
             }
         }

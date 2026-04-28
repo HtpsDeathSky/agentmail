@@ -681,7 +681,13 @@ impl AppApi {
                 let draft = pending.draft.as_ref().ok_or_else(|| {
                     ApiError::InvalidRequest("send pending action is missing draft".to_string())
                 })?;
-                self.send_message_now(draft).await.map(|_| ())
+                let send_result = self.send_message_now(draft).await;
+                if send_result.is_ok() {
+                    let _ = self
+                        .reconcile_sent_placeholders_after_send(&pending.account_id)
+                        .await;
+                }
+                send_result.map(|_| ())
             }
             MailActionKind::BatchDelete => {
                 let request = MailActionRequest {
@@ -798,6 +804,39 @@ impl AppApi {
             .send_message(&settings, draft)
             .await
             .map_err(Into::into)
+    }
+
+    async fn reconcile_sent_placeholders_after_send(&self, account_id: &str) -> ApiResult<()> {
+        let account = self.store.get_account(account_id)?;
+        if !account.sync_enabled {
+            return Ok(());
+        }
+        let settings = self.connection_settings_for_account(&account)?;
+        let folders = self.protocol.fetch_folders(&settings, &account).await?;
+        for folder in folders
+            .into_iter()
+            .filter(|folder| folder.role == FolderRole::Sent)
+        {
+            self.store.save_folder(&folder)?;
+            self.converge_fallback_sent_placeholders(&account.id, &folder)?;
+            let messages = self
+                .protocol
+                .fetch_messages(
+                    &settings,
+                    &account,
+                    &folder,
+                    &MessageFetchRequest {
+                        last_uid: None,
+                        limit: 25,
+                    },
+                )
+                .await?;
+            for message in messages {
+                self.store.upsert_message(&message)?;
+            }
+            self.store.refresh_folder_counts(&folder.id)?;
+        }
+        Ok(())
     }
 
     pub fn get_audit_log(&self, limit: Option<u32>) -> ApiResult<Vec<MailActionAudit>> {
@@ -2587,6 +2626,56 @@ mod tests {
         assert_eq!(real_sent_messages.len(), 1);
         assert_eq!(real_sent_messages[0].id, pending.local_message_id.unwrap());
         assert_eq!(real_sent_messages[0].uid.as_deref(), Some("501"));
+        assert_eq!(
+            api.store
+                .get_folder(&format!("{}:sent", account.id))
+                .unwrap()
+                .total_count,
+            0
+        );
+        assert_eq!(real_sent.total_count, 1);
+    }
+
+    #[tokio::test]
+    async fn confirm_send_reconciles_remote_sent_copy_without_waiting_for_polling() {
+        let sent_message_id = Arc::new(Mutex::new(None));
+        let protocol = SentConvergenceProtocol {
+            sent_message_id: Arc::clone(&sent_message_id),
+        };
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+
+        let pending_id = api
+            .send_message(SendMessageDraft {
+                account_id: account.id.clone(),
+                to: vec!["sec@example.com".to_string()],
+                cc: Vec::new(),
+                subject: "Confirm and reconcile".to_string(),
+                body: "body".to_string(),
+                message_id_header: None,
+            })
+            .await
+            .unwrap();
+        let pending = api.store.get_pending_action(&pending_id).unwrap();
+        *sent_message_id.lock() = pending.draft.unwrap().message_id_header;
+
+        api.confirm_action(pending_id).await.unwrap();
+
+        let real_sent = api
+            .store
+            .get_folder(&format!("{}:gmail--sent-mail", account.id))
+            .unwrap();
+        let real_sent_messages = api
+            .list_messages(MessageQuery {
+                account_id: Some(account.id.clone()),
+                folder_id: Some(real_sent.id.clone()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(real_sent_messages.len(), 1);
+        assert_eq!(real_sent_messages[0].uid.as_deref(), Some("501"));
+        assert_eq!(real_sent_messages[0].subject, "Converge sent");
         assert_eq!(
             api.store
                 .get_folder(&format!("{}:sent", account.id))

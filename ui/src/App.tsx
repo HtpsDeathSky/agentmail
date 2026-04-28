@@ -352,6 +352,45 @@ export async function runAutomaticAccountSync({
   };
 }
 
+type ManualAccountSyncRequest = {
+  accountId: string;
+  folderId: string | null;
+  query: string;
+  syncAccount: (accountId: string) => Promise<SyncSummary>;
+  startAccountWatchers?: (accountId: string) => Promise<unknown>;
+  refreshFolders: (accountId: string) => Promise<void>;
+  refreshMessages: (accountId: string, folderId: string | null, query: string) => Promise<void>;
+  refreshSyncState: (accountId: string) => Promise<void>;
+  refreshAudits: () => Promise<void>;
+  refreshPendingActions: (accountId: string) => Promise<void>;
+};
+
+export async function runManualAccountSync({
+  accountId,
+  folderId,
+  query,
+  syncAccount,
+  startAccountWatchers,
+  refreshFolders,
+  refreshMessages,
+  refreshSyncState,
+  refreshAudits,
+  refreshPendingActions
+}: ManualAccountSyncRequest) {
+  const summary = await syncAccount(accountId);
+  if (startAccountWatchers) {
+    await startAccountWatchers(accountId).catch(() => undefined);
+  }
+  await Promise.allSettled([
+    refreshFolders(accountId),
+    refreshMessages(accountId, folderId, query),
+    refreshSyncState(accountId),
+    refreshAudits(),
+    refreshPendingActions(accountId)
+  ]);
+  return `sync complete: ${summary.folders} folders / ${summary.messages} messages`;
+}
+
 export function App() {
   const [accounts, setAccounts] = useState<MailAccount[]>([]);
   const [folders, setFolders] = useState<MailFolder[]>([]);
@@ -633,13 +672,20 @@ export function App() {
     if (!selectedAccountId) return;
     setStatus("syncing account");
     try {
-      const summary = await api.syncAccount(selectedAccountId);
-      await refreshFolders(selectedAccountId);
-      await refreshMessages(selectedAccountId, selectedFolderId, query);
-      await refreshSyncState(selectedAccountId);
-      await refreshAudits();
-      await refreshPendingActions(selectedAccountId);
-      setStatus(`sync complete: ${summary.folders} folders / ${summary.messages} messages`);
+      setStatus(
+        await runManualAccountSync({
+          accountId: selectedAccountId,
+          folderId: selectedFolderId,
+          query,
+          syncAccount: api.syncAccount,
+          startAccountWatchers: api.startAccountWatchers,
+          refreshFolders,
+          refreshMessages,
+          refreshSyncState,
+          refreshAudits,
+          refreshPendingActions
+        })
+      );
     } catch (error) {
       await refreshSyncState(selectedAccountId);
       await refreshAudits();

@@ -717,7 +717,7 @@ fn parse_message(
             .unwrap_or_default(),
     );
     let body_preview = build_preview(&body);
-    let message_id_header = parsed.message_id().map(ToString::to_string);
+    let message_id_header = parsed.message_id().and_then(normalize_message_id_header);
     let attachments = parsed
         .attachments()
         .enumerate()
@@ -938,6 +938,18 @@ fn uid_set_from_strings(uids: &[String]) -> ProtocolResult<String> {
     Ok(compact_uid_set(&parsed))
 }
 
+fn normalize_message_id_header(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('<') && trimmed.ends_with('>') {
+        Some(trimmed.to_string())
+    } else {
+        Some(format!("<{trimmed}>"))
+    }
+}
+
 fn infer_folder_role(path: &str) -> FolderRole {
     let normalized = path.to_ascii_lowercase();
     let display_name = normalized
@@ -1006,6 +1018,7 @@ mod tests {
 
         let parsed = parse_message(&account, &folder, 42, raw, Some(raw.len() as u32)).unwrap();
         assert_eq!(parsed.uid.as_deref(), Some("42"));
+        assert_eq!(parsed.message_id_header.as_deref(), Some("<a@example.com>"));
         assert_eq!(parsed.subject, "Test report");
         assert!(parsed.body.as_deref().unwrap_or_default().contains("Hello"));
         assert_eq!(parsed.attachments.len(), 1);

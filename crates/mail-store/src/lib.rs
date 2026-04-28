@@ -1042,23 +1042,9 @@ fn upsert_message_tx(tx: &Transaction<'_>, message: &MailMessage) -> StoreResult
     let recipients_for_fts = message.recipients.join(" ");
 
     let hydrated_placeholder_id = match (&message.uid, &message.message_id_header) {
-        (Some(_), Some(message_id_header)) => tx
-            .query_row(
-                r#"
-                SELECT id
-                FROM messages
-                WHERE account_id = ?1
-                  AND folder_id = ?2
-                  AND uid IS NULL
-                  AND message_id_header = ?3
-                  AND deleted_at IS NULL
-                ORDER BY received_at DESC
-                LIMIT 1
-                "#,
-                params![message.account_id, message.folder_id, message_id_header],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?,
+        (Some(_), Some(message_id_header)) => {
+            find_uidless_placeholder_for_remote_message(tx, message, message_id_header)?
+        }
         _ => None,
     };
 
@@ -1097,26 +1083,28 @@ fn upsert_message_tx(tx: &Transaction<'_>, message: &MailMessage) -> StoreResult
         tx.execute(
             r#"
             UPDATE messages
-            SET uid=?2,
-                message_id_header=?3,
-                subject=?4,
-                sender=?5,
-                recipients_json=?6,
-                cc_json=?7,
-                received_at=?8,
-                body_preview=?9,
-                body=?10,
-                attachments_json=?11,
-                is_read=?12,
-                is_starred=?13,
-                is_answered=?14,
-                is_forwarded=?15,
-                size_bytes=?16,
-                deleted_at=?17
+            SET folder_id=?2,
+                uid=?3,
+                message_id_header=?4,
+                subject=?5,
+                sender=?6,
+                recipients_json=?7,
+                cc_json=?8,
+                received_at=?9,
+                body_preview=?10,
+                body=?11,
+                attachments_json=?12,
+                is_read=?13,
+                is_starred=?14,
+                is_answered=?15,
+                is_forwarded=?16,
+                size_bytes=?17,
+                deleted_at=?18
             WHERE id = ?1
             "#,
             params![
                 existing_id,
+                message.folder_id,
                 message.uid,
                 message.message_id_header,
                 message.subject,
@@ -1221,6 +1209,67 @@ fn upsert_message_tx(tx: &Transaction<'_>, message: &MailMessage) -> StoreResult
         )?;
     }
     Ok(stored_message_id)
+}
+
+fn find_uidless_placeholder_for_remote_message(
+    tx: &Transaction<'_>,
+    message: &MailMessage,
+    message_id_header: &str,
+) -> StoreResult<Option<String>> {
+    let same_folder = tx
+        .query_row(
+            r#"
+            SELECT id
+            FROM messages
+            WHERE account_id = ?1
+              AND folder_id = ?2
+              AND uid IS NULL
+              AND message_id_header = ?3
+              AND deleted_at IS NULL
+            ORDER BY received_at DESC
+            LIMIT 1
+            "#,
+            params![message.account_id, message.folder_id, message_id_header],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if same_folder.is_some() {
+        return Ok(same_folder);
+    }
+
+    let target_role = tx
+        .query_row(
+            r#"
+            SELECT role
+            FROM folders
+            WHERE id = ?1 AND account_id = ?2
+            "#,
+            params![message.folder_id, message.account_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if target_role.as_deref() != Some("sent") {
+        return Ok(None);
+    }
+
+    tx.query_row(
+        r#"
+        SELECT m.id
+        FROM messages m
+        JOIN folders f ON f.id = m.folder_id AND f.account_id = m.account_id
+        WHERE m.account_id = ?1
+          AND m.uid IS NULL
+          AND m.message_id_header = ?2
+          AND m.deleted_at IS NULL
+          AND f.role = 'sent'
+        ORDER BY m.received_at DESC
+        LIMIT 1
+        "#,
+        params![message.account_id, message_id_header],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn ensure_ai_insights_message_fk(conn: &mut Connection) -> StoreResult<()> {
@@ -1678,6 +1727,110 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, placeholder.id);
         assert!(store.search_messages("old", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn upsert_hydrates_sent_placeholder_across_sent_folders_by_message_id() {
+        let store = MailStore::memory().unwrap();
+        let now = now_rfc3339();
+        let account = MailAccount {
+            id: "acct".to_string(),
+            display_name: "Ops".to_string(),
+            email: "ops@example.com".to_string(),
+            imap_host: "imap.example.com".to_string(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_port: 465,
+            smtp_tls: true,
+            sync_enabled: true,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        store.save_account(&account).unwrap();
+        let fallback_sent = MailFolder {
+            id: "acct:sent".to_string(),
+            account_id: account.id.clone(),
+            name: "Sent".to_string(),
+            path: "Sent".to_string(),
+            role: FolderRole::Sent,
+            unread_count: 0,
+            total_count: 0,
+        };
+        let remote_sent = MailFolder {
+            id: "acct:sent-messages".to_string(),
+            account_id: account.id.clone(),
+            name: "Sent Messages".to_string(),
+            path: "Sent Messages".to_string(),
+            role: FolderRole::Sent,
+            unread_count: 0,
+            total_count: 0,
+        };
+        store.save_folder(&fallback_sent).unwrap();
+        store.save_folder(&remote_sent).unwrap();
+
+        let placeholder = MailMessage {
+            id: "local-send".to_string(),
+            account_id: account.id.clone(),
+            folder_id: fallback_sent.id.clone(),
+            uid: None,
+            message_id_header: Some("<stable-send@example.com>".to_string()),
+            subject: "Local sent placeholder".to_string(),
+            sender: account.email.clone(),
+            recipients: vec!["sec@example.com".to_string()],
+            cc: Vec::new(),
+            received_at: now.clone(),
+            body_preview: "local body".to_string(),
+            body: Some("local body".to_string()),
+            attachments: Vec::new(),
+            flags: MessageFlags {
+                is_read: true,
+                is_starred: false,
+                is_answered: true,
+                is_forwarded: false,
+            },
+            size_bytes: None,
+            deleted_at: None,
+        };
+        let mut remote = placeholder.clone();
+        remote.id = "remote-send".to_string();
+        remote.folder_id = remote_sent.id.clone();
+        remote.uid = Some("712".to_string());
+        remote.subject = "Remote sent copy".to_string();
+        remote.body_preview = "remote body".to_string();
+        remote.body = Some("remote body".to_string());
+        remote.size_bytes = Some(4096);
+
+        store.upsert_message(&placeholder).unwrap();
+        store.upsert_message(&remote).unwrap();
+        store.refresh_folder_counts(&fallback_sent.id).unwrap();
+        store.refresh_folder_counts(&remote_sent.id).unwrap();
+
+        let fallback_messages = store
+            .list_messages(&MessageQuery {
+                account_id: Some(account.id.clone()),
+                folder_id: Some(fallback_sent.id.clone()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+        let remote_messages = store
+            .list_messages(&MessageQuery {
+                account_id: Some(account.id.clone()),
+                folder_id: Some(remote_sent.id.clone()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+
+        assert!(fallback_messages.is_empty());
+        assert_eq!(remote_messages.len(), 1);
+        assert_eq!(remote_messages[0].id, "local-send");
+        assert_eq!(remote_messages[0].uid.as_deref(), Some("712"));
+        assert_eq!(remote_messages[0].folder_id, remote_sent.id);
+        assert_eq!(remote_messages[0].subject, "Remote sent copy");
+        assert_eq!(store.get_folder(&fallback_sent.id).unwrap().total_count, 0);
+        assert_eq!(store.get_folder(&remote_sent.id).unwrap().total_count, 1);
     }
 
     #[test]

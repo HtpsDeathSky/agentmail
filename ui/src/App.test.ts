@@ -12,6 +12,7 @@ import {
   refreshAfterMailSyncEvent,
   runAutomaticAccountSync,
   runInitialAccountSync,
+  runManualAccountSync,
   WORKSPACE_SPLIT_STORAGE_KEY,
   THEME_MODE_STORAGE_KEY
 } from "./App";
@@ -402,5 +403,44 @@ describe("runAutomaticAccountSync", () => {
     expect(refreshSyncState).not.toHaveBeenCalled();
     expect(refreshAudits).not.toHaveBeenCalled();
     expect(refreshPendingActions).not.toHaveBeenCalled();
+  });
+});
+
+describe("runManualAccountSync", () => {
+  it("syncs the account, restarts watchers, and refreshes visible state", async () => {
+    const syncAccount = vi.fn().mockResolvedValue({
+      account_id: "acct-1",
+      folders: 4,
+      messages: 11,
+      synced_at: "2026-04-28T00:00:00Z"
+    });
+    const startAccountWatchers = vi.fn().mockResolvedValue(undefined);
+    const refreshFolders = vi.fn().mockResolvedValue(undefined);
+    const refreshMessages = vi.fn().mockResolvedValue(undefined);
+    const refreshSyncState = vi.fn().mockResolvedValue(undefined);
+    const refreshAudits = vi.fn().mockResolvedValue(undefined);
+    const refreshPendingActions = vi.fn().mockResolvedValue(undefined);
+
+    const status = await runManualAccountSync({
+      accountId: "acct-1",
+      folderId: "acct-1:inbox",
+      query: "",
+      syncAccount,
+      startAccountWatchers,
+      refreshFolders,
+      refreshMessages,
+      refreshSyncState,
+      refreshAudits,
+      refreshPendingActions
+    });
+
+    expect(status).toBe("sync complete: 4 folders / 11 messages");
+    expect(syncAccount).toHaveBeenCalledWith("acct-1");
+    expect(startAccountWatchers).toHaveBeenCalledWith("acct-1");
+    expect(refreshFolders).toHaveBeenCalledWith("acct-1");
+    expect(refreshMessages).toHaveBeenCalledWith("acct-1", "acct-1:inbox", "");
+    expect(refreshSyncState).toHaveBeenCalledWith("acct-1");
+    expect(refreshAudits).toHaveBeenCalled();
+    expect(refreshPendingActions).toHaveBeenCalledWith("acct-1");
   });
 });
