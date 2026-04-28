@@ -17,6 +17,7 @@ import {
   runAutomaticAccountSync,
   runInitialAccountSync,
   runManualAccountSync,
+  writeStoredActivityLogVisibility,
   WORKSPACE_SPLIT_STORAGE_KEY,
   THEME_MODE_STORAGE_KEY
 } from "./App";
@@ -133,6 +134,14 @@ describe("activity log visibility helpers", () => {
     window.localStorage.setItem(ACTIVITY_LOG_STORAGE_KEY, "true");
 
     expect(readStoredActivityLogVisibility(window.localStorage)).toBe(true);
+  });
+
+  it("persists visible and hidden preferences without throwing", () => {
+    expect(() => writeStoredActivityLogVisibility(window.localStorage, true)).not.toThrow();
+    expect(window.localStorage.getItem(ACTIVITY_LOG_STORAGE_KEY)).toBe("true");
+
+    expect(() => writeStoredActivityLogVisibility(window.localStorage, false)).not.toThrow();
+    expect(window.localStorage.getItem(ACTIVITY_LOG_STORAGE_KEY)).toBe("false");
   });
 
   it("keeps the footer class out of the default app shell", () => {

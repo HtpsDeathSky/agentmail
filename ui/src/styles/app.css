@@ -192,10 +192,14 @@ button {
 
 .app-shell {
   display: grid;
-  grid-template-rows: 58px minmax(0, 1fr) minmax(154px, 24vh);
+  grid-template-rows: 58px minmax(0, 1fr);
   width: 100vw;
   height: 100vh;
   color: var(--color-text);
+}
+
+.app-shell.activity-log-visible {
+  grid-template-rows: 58px minmax(0, 1fr) minmax(118px, 18vh);
 }
 
 .topbar,
@@ -889,7 +893,7 @@ button {
 
 .status-console {
   display: grid;
-  grid-template-columns: minmax(280px, 0.8fr) minmax(260px, 0.7fr) minmax(420px, 1.3fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   min-height: 0;
   padding: 6px;
@@ -980,47 +984,6 @@ button {
   border-radius: 3px;
   background: var(--color-surface);
   white-space: normal;
-}
-
-.pending-feed {
-  overflow: auto;
-}
-
-.pending-feed p {
-  margin: 0;
-}
-
-.pending-action-row {
-  display: grid;
-  grid-template-columns: minmax(96px, 0.7fr) minmax(0, 1fr) auto;
-  gap: 6px;
-  align-items: center;
-  min-width: 0;
-}
-
-.pending-action-row code {
-  padding: 3px 6px;
-  border: 1px solid var(--color-warning-border);
-  border-radius: 3px;
-  background: var(--color-warning-surface);
-  color: var(--color-warning-bright);
-}
-
-.pending-action-row span {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  white-space: normal;
-}
-
-.pending-action-row div {
-  display: flex;
-  gap: 4px;
-}
-
-.pending-action-row button {
-  width: 28px;
-  margin: 0;
-  padding: 0;
 }
 
 .empty-state,
@@ -1364,7 +1327,11 @@ button {
 
   .app-shell {
     height: 100vh;
-    grid-template-rows: 58px minmax(0, 1fr) minmax(154px, 24vh);
+    grid-template-rows: 58px minmax(0, 1fr);
+  }
+
+  .app-shell.activity-log-visible {
+    grid-template-rows: 58px minmax(0, 1fr) minmax(118px, 22vh);
   }
 
   .workspace,
@@ -1431,7 +1398,11 @@ button {
 
 @media (max-width: 579px) {
   .app-shell {
-    grid-template-rows: 102px minmax(0, 1fr) minmax(154px, 24vh);
+    grid-template-rows: 102px minmax(0, 1fr);
+  }
+
+  .app-shell.activity-log-visible {
+    grid-template-rows: 102px minmax(0, 1fr) minmax(118px, 22vh);
   }
 
   .topbar {

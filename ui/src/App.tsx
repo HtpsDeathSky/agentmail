@@ -202,7 +202,7 @@ export function readStoredActivityLogVisibility(storage: Pick<Storage, "getItem"
   }
 }
 
-function writeStoredActivityLogVisibility(storage: Pick<Storage, "setItem"> | null | undefined, visible: boolean) {
+export function writeStoredActivityLogVisibility(storage: Pick<Storage, "setItem"> | null | undefined, visible: boolean) {
   try {
     storage?.setItem(ACTIVITY_LOG_STORAGE_KEY, visible ? "true" : "false");
   } catch {
@@ -478,6 +478,9 @@ export function App() {
   const [themeMode, setThemeMode] = useState<ThemeMode>(() =>
     typeof window === "undefined" ? "dark" : readStoredThemeMode(window.localStorage)
   );
+  const [showActivityLog, setShowActivityLog] = useState(() =>
+    typeof window === "undefined" ? false : readStoredActivityLogVisibility(window.localStorage)
+  );
   const [workspaceSplitPercent, setWorkspaceSplitPercent] = useState(() =>
     typeof window === "undefined" ? DEFAULT_WORKSPACE_SPLIT_PERCENT : readStoredWorkspaceSplitPercent(window.localStorage)
   );
@@ -497,6 +500,10 @@ export function App() {
     if (typeof document === "undefined") return;
     applyThemeModeToDocument(document.documentElement, typeof window === "undefined" ? null : window.localStorage, themeMode);
   }, [themeMode]);
+
+  useEffect(() => {
+    writeStoredActivityLogVisibility(typeof window === "undefined" ? null : window.localStorage, showActivityLog);
+  }, [showActivityLog]);
 
   const workspaceSplitModel = useMemo(
     () =>
@@ -957,7 +964,7 @@ export function App() {
   )} percent`;
 
   return (
-    <main className={getAppShellClassName(false)}>
+    <main className={getAppShellClassName(showActivityLog)}>
       <section className="topbar">
         <div className="brand-block" aria-label="AgentMail">
           <TerminalSquare size={21} />
@@ -1148,37 +1155,17 @@ export function App() {
         </div>
       </section>
 
-      <footer className="status-console">
-        <section className="console-panel">
-          <header>SYNC & CONNECTIONS</header>
-          <div className="console-row">
-            <span>ACCOUNT</span>
-            <code>{selectedAccount?.email ?? "none"}</code>
-          </div>
-          <div className="console-row">
-            <span>STATUS</span>
-            <code>{accountSyncState?.state ?? "idle"}</code>
-          </div>
-          <div className="console-row">
-            <span>LAST UID</span>
-            <code>{accountSyncState?.last_uid ?? "local"}</code>
-          </div>
-          <div className="console-row">
-            <span>FAILURES</span>
-            <code>{accountSyncState?.failure_count ?? 0}</code>
-          </div>
-          <button type="button" onClick={handleSync} disabled={!selectedAccountId}>
-            TEST / SYNC ACCOUNT
-          </button>
-        </section>
-        <section className="console-panel audit-feed">
-          <header>AUDIT / ACTIVITY LOG</header>
-          <p>{accountSyncState?.error_message ?? status}</p>
-          {audits.slice(0, 8).map((audit) => (
-            <code key={audit.id}>{formatAuditLine(audit)}</code>
-          ))}
-        </section>
-      </footer>
+      {showActivityLog ? (
+        <footer className="status-console">
+          <section className="console-panel audit-feed">
+            <header>AUDIT / ACTIVITY LOG</header>
+            <p>{accountSyncState?.error_message ?? status}</p>
+            {audits.slice(0, 8).map((audit) => (
+              <code key={audit.id}>{formatAuditLine(audit)}</code>
+            ))}
+          </section>
+        </footer>
+      ) : null}
 
       {isComposerOpen && selectedAccount ? <Composer account={selectedAccount} onClose={() => setComposerOpen(false)} onSent={handleSent} /> : null}
       {isConfigOpen ? (
@@ -1187,7 +1174,9 @@ export function App() {
           selectedAccountId={selectedAccountId}
           settings={aiSettings}
           themeMode={themeMode}
+          showActivityLog={showActivityLog}
           onThemeModeChange={setThemeMode}
+          onShowActivityLogChange={setShowActivityLog}
           onClose={() => setConfigOpen(false)}
           onAccountSaved={handleAccountConfigSaved}
           onAiSettingsSaved={refreshAiSettings}
@@ -1272,7 +1261,9 @@ interface ConfigurationModalProps {
   selectedAccountId: string | null;
   settings: AiSettingsView | null;
   themeMode: ThemeMode;
+  showActivityLog: boolean;
   onThemeModeChange: (mode: ThemeMode) => void;
+  onShowActivityLogChange: (visible: boolean) => void;
   onClose: () => void;
   onAccountSaved: (account: MailAccount) => Promise<void>;
   onAiSettingsSaved: () => Promise<void>;
@@ -1301,7 +1292,9 @@ function ConfigurationModal({
   selectedAccountId,
   settings,
   themeMode,
+  showActivityLog,
   onThemeModeChange,
+  onShowActivityLogChange,
   onClose,
   onAccountSaved,
   onAiSettingsSaved
@@ -1577,6 +1570,21 @@ function ConfigurationModal({
               >
                 {themeMode === "dark" ? <Sun size={16} /> : <Moon size={16} />}
                 {themeMode === "dark" ? "LIGHT" : "DARK"}
+              </button>
+            </div>
+            <div className="theme-switch-row">
+              <div>
+                <span>ACTIVITY LOG</span>
+                <strong>{showActivityLog ? "VISIBLE" : "HIDDEN"}</strong>
+              </div>
+              <button
+                type="button"
+                onClick={() => onShowActivityLogChange(!showActivityLog)}
+                aria-pressed={showActivityLog}
+                title={showActivityLog ? "Hide activity log" : "Show activity log"}
+              >
+                <PanelRight size={16} />
+                {showActivityLog ? "HIDE" : "SHOW"}
               </button>
             </div>
             <div className="theme-swatch-grid" aria-label="Theme color preview">
