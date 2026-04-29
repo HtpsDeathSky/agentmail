@@ -4,26 +4,18 @@ use std::{
     time::Duration,
 };
 
+use crate::sync_events::{emit_mail_sync_event, MailSyncEventPayload};
 use app_api::{ApiError, AppApi};
 use mail_core::FolderWatchOutcome;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-pub const MAIL_SYNC_EVENT: &str = "agentmail-mail-sync";
 pub const WATCH_DIAGNOSTIC_EVENT: &str = "agentmail-watch-diagnostic";
 const WATCHER_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Default)]
 pub struct WatcherRegistry {
     active: Arc<Mutex<HashSet<String>>>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct MailSyncEventPayload {
-    pub account_id: String,
-    pub folder_id: Option<String>,
-    pub reason: &'static str,
-    pub message: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -404,10 +396,6 @@ async fn sync_folder_after_change(
             }
         }
     }
-}
-
-pub fn emit_mail_sync_event(app: &AppHandle, payload: MailSyncEventPayload) {
-    let _ = app.emit(MAIL_SYNC_EVENT, payload);
 }
 
 pub fn emit_watch_diagnostic(app: &AppHandle, payload: WatchDiagnosticEventPayload) {

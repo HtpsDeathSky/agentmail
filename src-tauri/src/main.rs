@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-mod watchers;
+mod idle_watchers;
+mod sync_events;
 
 use std::sync::Arc;
 
@@ -8,16 +9,14 @@ use app_api::{
     AccountConfigView, AddAccountRequest, AppApi, SaveAccountConfigRequest, SyncSummary,
     TestConnectionRequest,
 };
+use idle_watchers::{start_account_watchers_for_api, WatcherRegistry};
 use mail_core::{
     AiInsight, AiSettingsView, ConnectionTestResult, MailAccount, MailActionAudit,
     MailActionRequest, MailActionResult, MailFolder, MailMessage, MessageQuery, PendingMailAction,
     SaveAiSettingsRequest, SendMessageDraft, SendMessageResult, SyncState,
 };
+use sync_events::{emit_mail_sync_event, MailSyncEventPayload};
 use tauri::{AppHandle, Manager, State};
-use watchers::{
-    emit_mail_sync_event, emit_watch_diagnostic, start_account_watchers_for_api,
-    MailSyncEventPayload, WatchDiagnosticEventPayload, WatcherRegistry,
-};
 
 struct ApiState {
     api: Arc<AppApi>,
@@ -260,9 +259,9 @@ fn main() {
                                 app_handle.clone(),
                                 account_id.clone(),
                             ) {
-                                emit_watch_diagnostic(
+                                idle_watchers::emit_watch_diagnostic(
                                     &app_handle,
-                                    WatchDiagnosticEventPayload {
+                                    idle_watchers::WatchDiagnosticEventPayload {
                                         account_id,
                                         folder_id: None,
                                         stage: "watch_start_failed",
