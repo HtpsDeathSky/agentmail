@@ -25,8 +25,8 @@ Use a disposable or dedicated test mailbox. Do not run destructive checks on a p
 
 ## Sync Acceptance
 
-- QQ automatic sync is IMAP IDLE-driven for all selectable folders returned by the account's IMAP folder list.
-- Background automatic sync must not use a 30-second polling interval.
+- Automatic sync is consistency-driven for every enabled account, not dependent on QQ IMAP IDLE push behavior.
+- While the app is running, enabled accounts sync at startup, after account save, on foreground resume, on a 120-second interval, and through manual sync.
 - Manual sync remains available from the topbar, shows a waiting ring while active, and refreshes folders/messages/sync state/audits after completion.
 - The folder rail shows Inbox. Sent, Archive, Trash, Drafts, and provider-specific folders appear when returned as selectable IMAP folders.
 - Selecting each synced folder loads messages for that folder, not only Inbox.
@@ -57,6 +57,7 @@ Use a disposable or dedicated test mailbox. Do not run destructive checks on a p
 
 ## Known Limits
 
+- IMAP IDLE watcher code is retained for future provider support, but it is dormant in the active sync path.
 - Attachment files are not downloaded yet; only metadata is indexed.
 - Permanent delete is limited to messages already in Trash and should be tested only with disposable mail.
 - AI analysis is manual only; API keys and mailbox passwords are stored plaintext in SQLite for this MVP, and only masked AI keys are returned to the UI.

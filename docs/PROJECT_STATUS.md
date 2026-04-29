@@ -6,7 +6,7 @@ Last updated: 2026-04-28
 
 - Repository: `HtpsDeathSky/agentmail`
 - Branch: `main`
-- Direct-actions cleanup and QQ dynamic IMAP IDLE sync are implemented on `main`; this status includes direct-send result hardening, browser-demo parity fixes, and QQ folder watcher work from the 2026-04-28 series.
+- Direct-actions cleanup and consistency-first automatic sync are implemented on `main`; this status includes direct-send result hardening, browser-demo parity fixes, and the 2026-04-29 shift away from active QQ IDLE watcher sync.
 - Current working tree: run `git status --short` in the active checkout before starting new work.
 - Local working tree note: `.codex` may appear as an untracked local directory; do not treat it as project state and do not commit it.
 - Use this file with `docs/DECISIONS.md`, `docs/NEXT_STEPS.md`, and `docs/REAL_MAIL_ACCEPTANCE.md` as the cross-session handoff memory.
@@ -32,9 +32,9 @@ The user flow is:
 - SQLite-backed accounts, folders, messages, sync state, FTS5 search, action audits, AI settings, and AI insights.
 - IMAP/SMTP account passwords are stored plaintext in SQLite for this MVP.
 - Live IMAP folder discovery and per-folder UID-based message sync.
-- QQ Mail automatic refresh uses IMAP IDLE watchers for the account's stored selectable folders.
-- Manual sync is still available and reconciles watchers after an explicit account sync.
-- Folder create/delete discovery is not automatic in this stage; startup, account save, or manual sync refreshes the folder list.
+- Automatic refresh is consistency-sync driven for all enabled accounts; startup, foreground resume, a 120-second running-app interval, account save, and manual sync all use account-level sync.
+- IMAP IDLE watcher code remains isolated for future providers, but it is not part of the active sync path in this stage.
+- Folder create/delete discovery is not realtime in this stage; startup, account save, interval, foreground, or manual sync refreshes the folder list.
 - MIME parsing with body text storage and attachment metadata indexing; attachment files are not downloaded.
 - Folder counts are refreshed from locally stored messages after sync and direct actions.
 - SMTP sending uses `lettre`; port `465` uses implicit TLS and port `587` uses STARTTLS.
@@ -62,7 +62,7 @@ The user flow is:
 
 ## Recent Verification
 
-For the QQ dynamic IMAP IDLE sync work, the following checks were run on 2026-04-28:
+For the consistency-sync architecture work, the following checks should be run on 2026-04-29:
 
 - `cargo fmt --all --check`
 - `git diff --check`
@@ -71,7 +71,7 @@ For the QQ dynamic IMAP IDLE sync work, the following checks were run on 2026-04
 - `pnpm test`
 - `pnpm build`
 - `pnpm rust:check`
-- `rg -n "AUTO_SYNC_INTERVAL_MS|runAutomaticAccountSync|setInterval\\(runAutoSync|auto sync complete" ui/src` returned no matches.
+- `rg -n "startAccountWatchers|watcher start failed|WATCH_DIAGNOSTIC_EVENT" ui/src` returned no matches.
 
 Environment caveat:
 
