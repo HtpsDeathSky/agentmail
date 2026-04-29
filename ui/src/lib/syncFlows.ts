@@ -33,10 +33,6 @@ function firstRejectedReason(results: PromiseSettledResult<unknown>[]) {
   return results.find((result): result is PromiseRejectedResult => result.status === "rejected")?.reason;
 }
 
-function appendWatcherWarning(status: string, watcherError: unknown) {
-  return watcherError ? `${status} / watcher start failed: ${String(watcherError)}` : status;
-}
-
 export async function runDirectSendFlow({
   draft,
   selectedFolderId,
@@ -81,7 +77,6 @@ export type InitialAccountSyncRequest = {
   folderId: string | null;
   query: string;
   syncAccount: (accountId: string) => Promise<SyncSummary>;
-  startAccountWatchers?: (accountId: string) => Promise<unknown>;
   refreshFolders: (accountId: string) => Promise<void>;
   refreshMessages: (accountId: string, folderId: string | null, query: string) => Promise<void>;
   refreshSyncState: (accountId: string) => Promise<void>;
@@ -95,7 +90,6 @@ export async function runInitialAccountSync({
   folderId,
   query,
   syncAccount,
-  startAccountWatchers,
   refreshFolders,
   refreshMessages,
   refreshSyncState,
@@ -113,18 +107,11 @@ export async function runInitialAccountSync({
 
   let summary: SyncSummary | null = null;
   let syncError: unknown = null;
-  let watcherError: unknown = null;
 
   try {
     summary = await syncAccount(accountId);
   } catch (error) {
     syncError = error;
-  }
-
-  if (summary && startAccountWatchers) {
-    await startAccountWatchers(accountId).catch((error) => {
-      watcherError = error;
-    });
   }
 
   await Promise.allSettled([
@@ -135,10 +122,7 @@ export async function runInitialAccountSync({
   ]);
 
   if (summary) {
-    return appendWatcherWarning(
-      `account saved and initial sync complete: ${email} / ${summary.folders} folders / ${summary.messages} messages`,
-      watcherError
-    );
+    return `account saved and initial sync complete: ${email} / ${summary.folders} folders / ${summary.messages} messages`;
   }
   return `account saved, but initial sync failed: ${String(syncError)}`;
 }
@@ -182,7 +166,6 @@ export type ManualAccountSyncRequest = {
   folderId: string | null;
   query: string;
   syncAccount: (accountId: string) => Promise<SyncSummary>;
-  startAccountWatchers?: (accountId: string) => Promise<unknown>;
   refreshFolders: (accountId: string) => Promise<void>;
   refreshMessages: (accountId: string, folderId: string | null, query: string) => Promise<void>;
   refreshSyncState: (accountId: string) => Promise<void>;
@@ -194,24 +177,17 @@ export async function runManualAccountSync({
   folderId,
   query,
   syncAccount,
-  startAccountWatchers,
   refreshFolders,
   refreshMessages,
   refreshSyncState,
   refreshAudits
 }: ManualAccountSyncRequest) {
   const summary = await syncAccount(accountId);
-  let watcherError: unknown = null;
-  if (startAccountWatchers) {
-    await startAccountWatchers(accountId).catch((error) => {
-      watcherError = error;
-    });
-  }
   await Promise.allSettled([
     refreshFolders(accountId),
     refreshMessages(accountId, folderId, query),
     refreshSyncState(accountId),
     refreshAudits()
   ]);
-  return appendWatcherWarning(`sync complete: ${summary.folders} folders / ${summary.messages} messages`, watcherError);
+  return `sync complete: ${summary.folders} folders / ${summary.messages} messages`;
 }

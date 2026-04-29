@@ -86,17 +86,9 @@ const defaultAccountConfigForm: SaveAccountConfigRequest = {
 };
 
 export const MAIL_SYNC_EVENT = "agentmail-mail-sync";
-export const WATCH_DIAGNOSTIC_EVENT = "agentmail-watch-diagnostic";
 const WORKSPACE_LIST_MIN_WIDTH = 320;
 const WORKSPACE_DETAIL_MIN_WIDTH = 420;
 const WORKSPACE_DIVIDER_WIDTH = 8;
-
-type WatchDiagnosticEventPayload = {
-  account_id: string;
-  folder_id?: string | null;
-  stage: string;
-  message?: string | null;
-};
 
 const roleIcon = {
   inbox: Inbox,
@@ -337,32 +329,6 @@ export function App() {
     let unlisten: (() => void) | null = null;
     let isCancelled = false;
 
-    void listen<WatchDiagnosticEventPayload>(WATCH_DIAGNOSTIC_EVENT, (event) => {
-      appendActivityLog(
-        `watch diagnostic: ${event.payload.stage} / account ${event.payload.account_id} / folder ${
-          event.payload.folder_id ?? "account"
-        }${event.payload.message ? ` / ${event.payload.message}` : ""}`
-      );
-    })
-      .then((dispose) => {
-        if (isCancelled) {
-          dispose();
-        } else {
-          unlisten = dispose;
-        }
-      })
-      .catch(() => undefined);
-
-    return () => {
-      isCancelled = true;
-      unlisten?.();
-    };
-  }, [appendActivityLog]);
-
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    let isCancelled = false;
-
     void listen<MailSyncEventPayload>(MAIL_SYNC_EVENT, (event) => {
       appendActivityLog(
         `mail sync event: ${event.payload.reason} / account ${event.payload.account_id} / folder ${
@@ -458,8 +424,7 @@ export function App() {
         accountId: selectedAccountId,
         folderId: selectedFolderId,
         query,
-        syncAccount: api.syncAccount,
-        startAccountWatchers: api.startAccountWatchers,
+        syncAccount: (accountId) => api.syncAccount(accountId, "manual_sync"),
         refreshFolders,
         refreshMessages,
         refreshSyncState,
@@ -544,8 +509,7 @@ export function App() {
         syncEnabled: account.sync_enabled,
         folderId: null,
         query,
-        syncAccount: api.syncAccount,
-        startAccountWatchers: api.startAccountWatchers,
+        syncAccount: (accountId) => api.syncAccount(accountId, "account_saved_sync"),
         refreshFolders,
         refreshMessages,
         refreshSyncState,
