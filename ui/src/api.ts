@@ -240,7 +240,7 @@ export const api = {
   listAccounts: () => call("list_accounts"),
   getAccountConfig: (accountId: string) => call("get_account_config", { accountId }),
   saveAccountConfig: (request: SaveAccountConfigRequest) => call("save_account_config", { request }),
-  syncAccount: (accountId: string) => call("sync_account", { accountId }),
+  syncAccount: (accountId: string, reason = "manual_sync") => call("sync_account", { accountId, reason }),
   startAccountWatchers: (accountId: string) => call("start_account_watchers", { accountId }),
   getSyncStatus: (accountId: string) => call("get_sync_status", { accountId }),
   listFolders: (accountId: string) => call("list_folders", { accountId }),
