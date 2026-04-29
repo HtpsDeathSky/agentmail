@@ -331,7 +331,7 @@ export const demoBackend = {
         recordAudit("mark_read", accountId, []);
         return summary;
       }
-      case "start_account_watchers":
+      case "run_foreground_sync":
         return null;
       case "get_sync_status": {
         const accountId = args?.accountId as string;

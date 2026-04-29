@@ -172,6 +172,7 @@ export function App() {
   const selectedFolderIdRef = useRef<string | null>(null);
   const selectedMessageIdRef = useRef<string | null>(null);
   const queryRef = useRef("");
+  const lastForegroundSyncAtRef = useRef(0);
 
   const appendActivityLog = useCallback((message: string) => {
     setActivityLogEntries((current) => appendActivityLogEntry(current, message));
@@ -374,6 +375,31 @@ export function App() {
       unlisten?.();
     };
   }, [appendActivityLog, refreshAudits, refreshFolders, refreshMessages, refreshSyncState]);
+
+  const requestForegroundSync = useCallback(() => {
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    const now = Date.now();
+    if (now - lastForegroundSyncAtRef.current < 30_000) return;
+    lastForegroundSyncAtRef.current = now;
+    const accountId = selectedAccountIdRef.current;
+    void api
+      .runForegroundSync(accountId)
+      .then(() => appendActivityLog(`foreground sync requested: ${accountId ?? "all accounts"}`))
+      .catch((error) => appendActivityLog(`foreground sync request failed: ${String(error)}`));
+  }, [appendActivityLog]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") requestForegroundSync();
+    };
+    window.addEventListener("focus", requestForegroundSync);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", requestForegroundSync);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [requestForegroundSync]);
 
   useEffect(() => {
     setSelectedMessage(null);

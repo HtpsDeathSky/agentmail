@@ -69,8 +69,9 @@ describe("api demo AI bindings", () => {
     expect(insight.reply_draft === "" || /[\u4e00-\u9fff]/.test(insight.reply_draft)).toBe(true);
   });
 
-  it("supports starting account watchers in the browser demo", async () => {
-    await expect(api.startAccountWatchers("demo-account")).resolves.toBeNull();
+  it("supports foreground sync in the browser demo", async () => {
+    await expect(api.runForegroundSync("demo-account")).resolves.toBeNull();
+    await expect(api.runForegroundSync(null)).resolves.toBeNull();
   });
 
   it("sends directly in the browser demo and records Sent mail", async () => {
