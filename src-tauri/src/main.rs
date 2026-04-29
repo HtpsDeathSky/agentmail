@@ -2,6 +2,7 @@
 
 mod idle_watchers;
 mod sync_events;
+mod sync_service;
 
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ use mail_core::{
     SaveAiSettingsRequest, SendMessageDraft, SendMessageResult, SyncState,
 };
 use sync_events::{emit_mail_sync_event, MailSyncEventPayload};
+use sync_service::{sync_reason_from_request, ConsistencySyncService};
 use tauri::{AppHandle, Manager, State};
 
 struct ApiState {
