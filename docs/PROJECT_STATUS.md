@@ -1,6 +1,6 @@
 # Project Status
 
-Last updated: 2026-04-28
+Last updated: 2026-04-29
 
 ## Current Source of Truth
 
@@ -71,7 +71,7 @@ For the consistency-sync architecture work, the following checks should be run o
 - `pnpm test`
 - `pnpm build`
 - `pnpm rust:check`
-- `rg -n "startAccountWatchers|watcher start failed|WATCH_DIAGNOSTIC_EVENT" ui/src` returned no matches.
+- `rg -n "startAccountWatchers|watcher start failed|WATCH_DIAGNOSTIC_EVENT" ui/src` should return no matches.
 
 Environment caveat:
 
