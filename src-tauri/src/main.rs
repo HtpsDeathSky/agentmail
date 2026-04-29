@@ -16,7 +16,6 @@ use mail_core::{
     MailActionRequest, MailActionResult, MailFolder, MailMessage, MessageQuery, PendingMailAction,
     SaveAiSettingsRequest, SendMessageDraft, SendMessageResult, SyncState,
 };
-use sync_events::{emit_mail_sync_event, MailSyncEventPayload};
 use sync_service::{sync_reason_from_request, ConsistencySyncService};
 use tauri::{AppHandle, Manager, State};
 
@@ -71,10 +70,25 @@ async fn save_account_config(
 
 #[tauri::command]
 async fn sync_account(
-    state: State<'_, ApiState>,
+    sync_service: State<'_, ConsistencySyncService>,
     account_id: String,
+    reason: Option<String>,
 ) -> Result<SyncSummary, String> {
-    state.api.sync_account(account_id).await.map_err(to_error)
+    sync_service
+        .sync_account_once(account_id, sync_reason_from_request(reason))
+        .await
+        .map_err(to_error)
+}
+
+#[tauri::command]
+async fn run_foreground_sync(
+    sync_service: State<'_, ConsistencySyncService>,
+    selected_account_id: Option<String>,
+) -> Result<(), String> {
+    sync_service
+        .handle_foreground_resume(selected_account_id)
+        .await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -232,49 +246,17 @@ fn main() {
             let api = AppApi::new_default(db_path)
                 .map_err(|err| format!("failed to initialize backend: {err}"))?;
             let api = Arc::new(api);
-            let watcher_registry = WatcherRegistry::default();
             app.manage(ApiState {
                 api: Arc::clone(&api),
             });
-            app.manage(watcher_registry.clone());
-            let app_handle = app.handle().clone();
+            let sync_service = ConsistencySyncService::new(Arc::clone(&api), app.handle().clone());
+            app.manage(sync_service.clone());
+            app.manage(WatcherRegistry::default());
+            let startup_sync = sync_service.clone();
             tauri::async_runtime::spawn(async move {
-                if let Ok(accounts) = api.list_accounts() {
-                    for account in accounts.into_iter().filter(|account| account.sync_enabled) {
-                        let account_id = account.id;
-                        if let Ok(summary) = api.sync_account(account_id.clone()).await {
-                            emit_mail_sync_event(
-                                &app_handle,
-                                MailSyncEventPayload {
-                                    account_id: summary.account_id,
-                                    folder_id: None,
-                                    reason: "startup_sync",
-                                    message: Some(format!(
-                                        "{} folders / {} messages",
-                                        summary.folders, summary.messages
-                                    )),
-                                },
-                            );
-                            if let Err(error) = start_account_watchers_for_api(
-                                Arc::clone(&api),
-                                watcher_registry.clone(),
-                                app_handle.clone(),
-                                account_id.clone(),
-                            ) {
-                                idle_watchers::emit_watch_diagnostic(
-                                    &app_handle,
-                                    idle_watchers::WatchDiagnosticEventPayload {
-                                        account_id,
-                                        folder_id: None,
-                                        stage: "watch_start_failed",
-                                        message: Some(error),
-                                    },
-                                );
-                            }
-                        }
-                    }
-                }
+                startup_sync.sync_enabled_accounts("startup_sync").await;
             });
+            sync_service.start_interval_sync();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -284,6 +266,7 @@ fn main() {
             get_account_config,
             save_account_config,
             sync_account,
+            run_foreground_sync,
             start_account_watchers,
             get_sync_status,
             list_folders,
