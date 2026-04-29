@@ -34,6 +34,7 @@ impl SyncRunRegistry {
         })
     }
 
+    #[cfg(test)]
     pub fn is_active(&self, account_id: &str) -> bool {
         self.active
             .lock()
