@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentMail is a Windows-first desktop mail client MVP built with Tauri, Rust, React, and SQLite."
+    />
+    <title>AgentMail - Windows AI Mail Client</title>
+    <link rel="icon" href="./assets/icon.png" type="image/png" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="site-header" aria-label="Primary navigation">
+      <a class="brand" href="#top" aria-label="AgentMail home">
+        <span class="brand-mark" aria-hidden="true">AM</span>
+        <span>AgentMail</span>
+      </a>
+      <nav class="nav-links" aria-label="Page sections">
+        <a href="#download">Download</a>
+        <a href="#capabilities">Capabilities</a>
+        <a href="#limits">Limits</a>
+        <a href="https://github.com/HtpsDeathSky/agentmail">GitHub</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="system-line">LOCAL MAIL CONTROL / manual AI analysis</p>
+          <h1>AgentMail</h1>
+          <p class="hero-text">
+            Windows-first desktop mail client built for practical IMAP/SMTP mail management,
+            local SQLite storage, and explicit user-triggered AI analysis.
+          </p>
+          <div class="hero-actions" aria-label="Primary actions">
+            <a class="button button-primary" href="https://github.com/HtpsDeathSky/agentmail/releases/latest">
+              Download for Windows
+            </a>
+            <a class="button button-secondary" href="https://github.com/HtpsDeathSky/agentmail">
+              View Source
+            </a>
+          </div>
+        </div>
+
+        <aside class="terminal-panel" aria-label="AgentMail release status">
+          <div class="panel-topline">
+            <span class="panel-title">
+              <img src="./assets/icon.png" alt="" />
+              agentmail.release
+            </span>
+            <span>Windows</span>
+          </div>
+          <div class="terminal-body">
+            <p><span class="muted">$</span> sync --mode consistency</p>
+            <p><span class="ok">OK</span> IMAP folders indexed into SQLite</p>
+            <p><span class="ok">OK</span> SMTP direct send audited locally</p>
+            <p><span class="ok">OK</span> AI analysis requires manual action</p>
+            <p><span class="warn">MVP</span> secrets stored plaintext in SQLite</p>
+          </div>
+        </aside>
+      </section>
+
+      <section id="download" class="download-band" aria-labelledby="download-title">
+        <div>
+          <p class="section-label">Download</p>
+          <h2 id="download-title">Install the latest Windows build.</h2>
+          <p>
+            Installers are built by GitHub Actions from version tags and published through
+            GitHub Releases.
+          </p>
+        </div>
+        <a class="button button-primary" href="https://github.com/HtpsDeathSky/agentmail/releases/latest">
+          Latest Release
+        </a>
+      </section>
+
+      <section id="capabilities" class="content-section" aria-labelledby="capabilities-title">
+        <div class="section-heading">
+          <p class="section-label">MVP Capabilities</p>
+          <h2 id="capabilities-title">Mail first, AI by deliberate action.</h2>
+        </div>
+        <div class="feature-grid">
+          <article>
+            <h3>Windows desktop shell</h3>
+            <p>Tauri v2 app with a Rust backend, React/Vite UI, and SQLite local state.</p>
+          </article>
+          <article>
+            <h3>IMAP/SMTP workflow</h3>
+            <p>Manual account setup, connection tests, folder sync, search, reading, and direct send.</p>
+          </article>
+          <article>
+            <h3>Local mail database</h3>
+            <p>Accounts, folders, messages, sync state, search index, audits, and AI insights live locally.</p>
+          </article>
+          <article>
+            <h3>Manual remote AI</h3>
+            <p>Selected messages can be analyzed through an HTTPS OpenAI-compatible provider.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="limits" class="content-section split-section" aria-labelledby="limits-title">
+        <div>
+          <p class="section-label">Current Limits</p>
+          <h2 id="limits-title">Clear boundaries for the current build.</h2>
+        </div>
+        <ul class="limit-list">
+          <li>Mailbox passwords and AI API keys are stored plaintext in SQLite for this MVP.</li>
+          <li>AI analysis is manual only; incoming mail is not analyzed automatically.</li>
+          <li>OAuth, tray mode, notifications, attachment downloads, and rules are not implemented yet.</li>
+          <li>Use provider app passwords where required by the mail provider.</li>
+        </ul>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>AgentMail MVP</span>
+      <a href="https://github.com/HtpsDeathSky/agentmail/releases/latest">Releases</a>
+      <a href="https://github.com/HtpsDeathSky/agentmail/blob/main/README.md">README</a>
+    </footer>
+  </body>
+</html>
