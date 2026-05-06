@@ -41,7 +41,7 @@ pub enum MailProvider {
     Gmail,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MailAuth {
     Password {
@@ -52,6 +52,23 @@ pub enum MailAuth {
         access_token: String,
         expires_at: Timestamp,
     },
+}
+
+impl std::fmt::Debug for MailAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Password { .. } => f
+                .debug_struct("Password")
+                .field("password", &"***")
+                .finish(),
+            Self::GoogleOAuth { expires_at, .. } => f
+                .debug_struct("GoogleOAuth")
+                .field("refresh_token", &"***")
+                .field("access_token", &"***")
+                .field("expires_at", expires_at)
+                .finish(),
+        }
+    }
 }
 
 impl Default for MailAuth {
@@ -466,6 +483,28 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("")
         );
+    }
+
+    #[test]
+    fn mail_auth_debug_redacts_secrets() {
+        let password = MailAuth::Password {
+            password: "plain-password".to_string(),
+        };
+        let oauth = MailAuth::GoogleOAuth {
+            refresh_token: "refresh-secret".to_string(),
+            access_token: "access-secret".to_string(),
+            expires_at: "2026-05-06T01:00:00Z".to_string(),
+        };
+
+        let password_debug = format!("{password:?}");
+        let oauth_debug = format!("{oauth:?}");
+
+        assert!(!password_debug.contains("plain-password"));
+        assert!(password_debug.contains("***"));
+        assert!(!oauth_debug.contains("refresh-secret"));
+        assert!(!oauth_debug.contains("access-secret"));
+        assert!(oauth_debug.contains("***"));
+        assert!(oauth_debug.contains("2026-05-06T01:00:00Z"));
     }
 
     #[test]
