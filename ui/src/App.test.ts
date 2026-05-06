@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   clampWorkspaceSplitPercent,
+  getAccountProviderFormMode,
   getAppShellClassName,
   getWorkspaceSplitModel
 } from "./App";
@@ -55,6 +56,16 @@ describe("getManualSyncButtonState", () => {
       className: "icon-button sync-button syncing",
       disabled: true,
       title: "Sync running"
+    });
+  });
+});
+
+describe("getAccountProviderFormMode", () => {
+  it("uses google sign-in controls for Gmail accounts", () => {
+    expect(getAccountProviderFormMode("gmail")).toEqual({
+      showPasswordField: false,
+      showGoogleSignIn: true,
+      testConnectionEnabled: false
     });
   });
 });

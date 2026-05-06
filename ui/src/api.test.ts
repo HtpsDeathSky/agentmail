@@ -74,6 +74,26 @@ describe("api demo AI bindings", () => {
     await expect(api.runForegroundSync(null)).resolves.toBeNull();
   });
 
+  it("starts and completes Gmail OAuth in the browser demo", async () => {
+    const start = await api.startGoogleOAuth({
+      email: "demo@gmail.com",
+      display_name: "Demo Gmail"
+    });
+
+    expect(start.authorization_url).toContain("accounts.google.com");
+    expect(start.redirect_uri).toContain("/oauth/google/callback");
+
+    const account = await api.completeGoogleOAuth({
+      verifier_id: start.verifier_id,
+      authorization_code: "demo-code",
+      state: "demo-state"
+    });
+
+    expect(account.provider).toBe("gmail");
+    expect(account.imap_host).toBe("imap.gmail.com");
+    expect(account.smtp_host).toBe("smtp.gmail.com");
+  });
+
   it("sends directly in the browser demo and records Sent mail", async () => {
     const account = await api.saveAccountConfig({
       id: null,

@@ -2,11 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { demoBackend } from "./data/demoBackend";
 
 export type Timestamp = string;
+export type MailProvider = "generic_imap_smtp" | "gmail";
 
 export interface MailAccount {
   id: string;
   display_name: string;
   email: string;
+  provider?: MailProvider;
   imap_host: string;
   imap_port: number;
   imap_tls: boolean;
@@ -84,6 +86,7 @@ export interface AddAccountRequest {
 
 export interface AccountConfigView extends AddAccountRequest {
   id: string;
+  provider?: MailProvider;
   sync_enabled: boolean;
   created_at: Timestamp;
   updated_at: Timestamp;
@@ -98,6 +101,27 @@ export interface ConnectionTestResult {
   imap_ok: boolean;
   smtp_ok: boolean;
   message: string;
+}
+
+export interface GmailOAuthStartRequest {
+  email: string;
+  display_name: string;
+}
+
+export interface GmailOAuthStartResult {
+  authorization_url: string;
+  verifier_id: string;
+  redirect_uri: string;
+}
+
+export interface GmailOAuthCompleteRequest {
+  verifier_id: string;
+  authorization_code: string;
+  state: string;
+}
+
+export interface GmailOAuthRefreshRequest {
+  account_id: string;
 }
 
 export interface SyncState {
@@ -207,6 +231,9 @@ type CommandMap = {
   list_accounts: MailAccount[];
   get_account_config: AccountConfigView;
   save_account_config: MailAccount;
+  start_google_oauth: GmailOAuthStartResult;
+  complete_google_oauth: MailAccount;
+  refresh_google_oauth: MailAccount;
   sync_account: SyncSummary;
   run_foreground_sync: null;
   get_sync_status: SyncState[];
@@ -240,6 +267,9 @@ export const api = {
   listAccounts: () => call("list_accounts"),
   getAccountConfig: (accountId: string) => call("get_account_config", { accountId }),
   saveAccountConfig: (request: SaveAccountConfigRequest) => call("save_account_config", { request }),
+  startGoogleOAuth: (request: GmailOAuthStartRequest) => call("start_google_oauth", { request }),
+  completeGoogleOAuth: (request: GmailOAuthCompleteRequest) => call("complete_google_oauth", { request }),
+  refreshGoogleOAuth: (request: GmailOAuthRefreshRequest) => call("refresh_google_oauth", { request }),
   syncAccount: (accountId: string, reason = "manual_sync") => call("sync_account", { accountId, reason }),
   runForegroundSync: (selectedAccountId: string | null) => call("run_foreground_sync", { selectedAccountId }),
   getSyncStatus: (accountId: string) => call("get_sync_status", { accountId }),

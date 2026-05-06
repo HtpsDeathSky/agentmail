@@ -44,6 +44,7 @@ import {
   MailActionKind,
   MailFolder,
   MailMessage,
+  MailProvider,
   SaveAccountConfigRequest,
   SaveAiSettingsRequest,
   SendMessageDraft,
@@ -84,6 +85,25 @@ const defaultAccountConfigForm: SaveAccountConfigRequest = {
   smtp_tls: true,
   sync_enabled: true
 };
+
+const gmailAccountPreset: SaveAccountConfigRequest = {
+  ...defaultAccountConfigForm,
+  password: "",
+  imap_host: "imap.gmail.com",
+  imap_port: 993,
+  imap_tls: true,
+  smtp_host: "smtp.gmail.com",
+  smtp_port: 465,
+  smtp_tls: true
+};
+
+export function getAccountProviderFormMode(provider: MailProvider) {
+  return {
+    showPasswordField: provider !== "gmail",
+    showGoogleSignIn: provider === "gmail",
+    testConnectionEnabled: provider !== "gmail"
+  };
+}
 
 export const MAIL_SYNC_EVENT = "agentmail-mail-sync";
 const WORKSPACE_LIST_MIN_WIDTH = 320;
@@ -1034,6 +1054,12 @@ function accountConfigToForm(config: AccountConfigView): SaveAccountConfigReques
   };
 }
 
+function inferAccountProvider(account: MailAccount | AccountConfigView | null | undefined): MailProvider {
+  if (!account) return "generic_imap_smtp";
+  if (account.provider === "gmail" || account.email.toLowerCase().endsWith("@gmail.com")) return "gmail";
+  return "generic_imap_smtp";
+}
+
 function ConfigurationModal({
   accounts,
   selectedAccountId,
@@ -1048,6 +1074,7 @@ function ConfigurationModal({
 }: ConfigurationModalProps) {
   const [activeTab, setActiveTab] = useState<ConfigTab>("accounts");
   const [selectedId, setSelectedId] = useState<string | null>(selectedAccountId ?? accounts[0]?.id ?? null);
+  const [accountProvider, setAccountProvider] = useState<MailProvider>("generic_imap_smtp");
   const [accountForm, setAccountForm] = useState<SaveAccountConfigRequest>({ ...defaultAccountConfigForm });
   const [accountStatus, setAccountStatus] = useState("select account or add new");
   const [isAccountBusy, setAccountBusy] = useState(false);
@@ -1060,6 +1087,7 @@ function ConfigurationModal({
   });
   const [aiStatus, setAiStatus] = useState(settings?.api_key_mask ? `key saved: ${settings.api_key_mask}` : "key not set");
   const [isAiBusy, setAiBusy] = useState(false);
+  const accountFormMode = getAccountProviderFormMode(accountProvider);
 
   useEffect(() => {
     if (selectedId && !accounts.some((account) => account.id === selectedId)) {
@@ -1080,6 +1108,7 @@ function ConfigurationModal({
       .getAccountConfig(selectedId)
       .then((config) => {
         if (isCancelled) return;
+        setAccountProvider(inferAccountProvider(config));
         setAccountForm(accountConfigToForm(config));
         setAccountStatus(`loaded ${config.email}`);
       })
@@ -1096,17 +1125,36 @@ function ConfigurationModal({
     setAccountForm((current) => ({ ...current, [field]: value }));
   };
 
+  const updateAccountProvider = (provider: MailProvider) => {
+    setAccountProvider(provider);
+    setAccountForm((current) =>
+      provider === "gmail"
+        ? {
+            ...current,
+            ...gmailAccountPreset,
+            id: current.id,
+            display_name: current.display_name,
+            email: current.email,
+            sync_enabled: current.sync_enabled
+          }
+        : current
+    );
+    setAccountStatus(provider === "gmail" ? "gmail account uses google sign in" : "manual imap/smtp account");
+  };
+
   const updateAi = (field: keyof SaveAiSettingsRequest, value: string | boolean) => {
     setAiForm((current) => ({ ...current, [field]: value }));
   };
 
   const startNewAccount = () => {
     setSelectedId(null);
+    setAccountProvider("generic_imap_smtp");
     setAccountForm({ ...defaultAccountConfigForm });
     setAccountStatus("new account");
   };
 
   const testAccount = async () => {
+    if (!accountFormMode.testConnectionEnabled) return;
     setAccountBusy(true);
     setAccountStatus("testing account connection");
     try {
@@ -1119,8 +1167,47 @@ function ConfigurationModal({
     }
   };
 
+  const signInWithGoogle = async () => {
+    setAccountBusy(true);
+    setAccountStatus("opening browser for google sign in");
+    try {
+      const start = await api.startGoogleOAuth({
+        email: accountForm.email,
+        display_name: accountForm.display_name || "Gmail"
+      });
+      if (typeof window !== "undefined" && start.authorization_url) {
+        window.open(start.authorization_url, "_blank", "noopener,noreferrer");
+      }
+      setAccountStatus("waiting for google authorization code");
+      const code = window.prompt("Google authorization code");
+      if (!code) {
+        setAccountStatus("google sign in cancelled");
+        return;
+      }
+      const state = window.prompt("Google OAuth state") ?? "";
+      setAccountStatus("exchanging google token");
+      const account = await api.completeGoogleOAuth({
+        verifier_id: start.verifier_id,
+        authorization_code: code,
+        state
+      });
+      setSelectedId(account.id);
+      setAccountProvider("gmail");
+      await onAccountSaved(account);
+      setAccountStatus(`google sign in complete: ${account.email}`);
+    } catch (error) {
+      setAccountStatus(`google sign in failed: ${String(error)}`);
+    } finally {
+      setAccountBusy(false);
+    }
+  };
+
   const submitAccount = async (event: FormEvent) => {
     event.preventDefault();
+    if (accountProvider === "gmail") {
+      await signInWithGoogle();
+      return;
+    }
     setAccountBusy(true);
     setAccountStatus("saving account config");
     try {
@@ -1215,6 +1302,13 @@ function ConfigurationModal({
             </aside>
             <section className="config-form-grid">
               <label>
+                Provider
+                <select value={accountProvider} onChange={(event) => updateAccountProvider(event.target.value as MailProvider)}>
+                  <option value="generic_imap_smtp">Generic IMAP/SMTP</option>
+                  <option value="gmail">Gmail</option>
+                </select>
+              </label>
+              <label>
                 Display
                 <input value={accountForm.display_name} onChange={(event) => updateAccount("display_name", event.target.value)} required />
               </label>
@@ -1222,10 +1316,12 @@ function ConfigurationModal({
                 Email
                 <input type="email" value={accountForm.email} onChange={(event) => updateAccount("email", event.target.value)} required />
               </label>
-              <label>
-                Password
-                <input type="password" value={accountForm.password} onChange={(event) => updateAccount("password", event.target.value)} required />
-              </label>
+              {accountFormMode.showPasswordField ? (
+                <label>
+                  Password
+                  <input type="password" value={accountForm.password} onChange={(event) => updateAccount("password", event.target.value)} required />
+                </label>
+              ) : null}
               <label>
                 IMAP Host
                 <input value={accountForm.imap_host} onChange={(event) => updateAccount("imap_host", event.target.value)} required />
@@ -1259,9 +1355,15 @@ function ConfigurationModal({
                 <button type="button" onClick={testAccount} disabled={isAccountBusy}>
                   TEST
                 </button>
-                <button type="submit" disabled={isAccountBusy}>
-                  {isAccountBusy ? "SAVING" : "SAVE"}
-                </button>
+                {accountFormMode.showGoogleSignIn ? (
+                  <button type="button" onClick={signInWithGoogle} disabled={isAccountBusy}>
+                    {isAccountBusy ? "WAITING" : "SIGN IN WITH GOOGLE"}
+                  </button>
+                ) : (
+                  <button type="submit" disabled={isAccountBusy}>
+                    {isAccountBusy ? "SAVING" : "SAVE"}
+                  </button>
+                )}
               </footer>
             </section>
           </form>
