@@ -69,12 +69,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $bundleRoot = "src-tauri/target/release/bundle"
-          $assets = Get-ChildItem -Path $bundleRoot -Recurse -File |
+          $bundleRoots = @(
+            "target/release/bundle",
+            "src-tauri/target/release/bundle"
+          )
+          $existingBundleRoots = $bundleRoots | Where-Object { Test-Path $_ }
+          if (-not $existingBundleRoots) {
+            Write-Host "No bundle directories found. Checked:"
+            $bundleRoots | ForEach-Object { Write-Host " - $_" }
+            throw "No Windows bundle directories found"
+          }
+
+          $assets = $existingBundleRoots |
+            ForEach-Object { Get-ChildItem -Path $_ -Recurse -File } |
             Where-Object { $_.Extension -in ".exe", ".msi" } |
             Select-Object -ExpandProperty FullName
           if (-not $assets) {
-            throw "No Windows installer assets found under $bundleRoot"
+            Write-Host "No Windows installer assets found. Checked bundle directories:"
+            $existingBundleRoots | ForEach-Object { Write-Host " - $_" }
+            throw "No Windows installer assets found"
           }
 
           $tag = "${{ github.ref_name }}"
