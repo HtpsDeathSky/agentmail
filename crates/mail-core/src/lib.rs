@@ -417,427 +417,24 @@ impl std::fmt::Debug for SaveAiSettingsRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::de::{
-        self, value::MapAccessDeserializer, DeserializeSeed, IntoDeserializer, MapAccess, Visitor,
-    };
-    use serde::ser::{
-        self, Impossible, SerializeMap, SerializeStruct, SerializeStructVariant, Serializer,
-    };
-    use serde::Deserialize;
-    use std::collections::BTreeMap;
-    use std::fmt;
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    enum TestValue {
-        String(String),
-        U64(u64),
-        Bool(bool),
-        Map(BTreeMap<String, TestValue>),
-    }
-
-    impl TestValue {
-        fn as_str(&self) -> Option<&str> {
-            match self {
-                Self::String(value) => Some(value),
-                _ => None,
-            }
-        }
-
-        fn get(&self, key: &str) -> Option<&Self> {
-            match self {
-                Self::Map(values) => values.get(key),
-                _ => None,
-            }
-        }
-    }
-
-    #[derive(Debug)]
-    struct TestSerdeError(String);
-
-    impl fmt::Display for TestSerdeError {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str(&self.0)
-        }
-    }
-
-    impl std::error::Error for TestSerdeError {}
-
-    impl ser::Error for TestSerdeError {
-        fn custom<T: fmt::Display>(message: T) -> Self {
-            Self(message.to_string())
-        }
-    }
-
-    impl de::Error for TestSerdeError {
-        fn custom<T: fmt::Display>(message: T) -> Self {
-            Self(message.to_string())
-        }
-    }
-
-    struct TestSerializer;
-
-    fn unsupported<T>() -> Result<T, TestSerdeError> {
-        Err(TestSerdeError(
-            "unsupported test serializer value".to_string(),
-        ))
-    }
-
-    impl Serializer for TestSerializer {
-        type Ok = TestValue;
-        type Error = TestSerdeError;
-        type SerializeSeq = Impossible<TestValue, TestSerdeError>;
-        type SerializeTuple = Impossible<TestValue, TestSerdeError>;
-        type SerializeTupleStruct = Impossible<TestValue, TestSerdeError>;
-        type SerializeTupleVariant = Impossible<TestValue, TestSerdeError>;
-        type SerializeMap = TestMapSerializer;
-        type SerializeStruct = TestMapSerializer;
-        type SerializeStructVariant = TestMapSerializer;
-
-        fn serialize_bool(self, value: bool) -> Result<Self::Ok, Self::Error> {
-            Ok(TestValue::Bool(value))
-        }
-
-        fn serialize_u16(self, value: u16) -> Result<Self::Ok, Self::Error> {
-            Ok(TestValue::U64(u64::from(value)))
-        }
-
-        fn serialize_u32(self, value: u32) -> Result<Self::Ok, Self::Error> {
-            Ok(TestValue::U64(u64::from(value)))
-        }
-
-        fn serialize_u64(self, value: u64) -> Result<Self::Ok, Self::Error> {
-            Ok(TestValue::U64(value))
-        }
-
-        fn serialize_str(self, value: &str) -> Result<Self::Ok, Self::Error> {
-            Ok(TestValue::String(value.to_string()))
-        }
-
-        fn serialize_unit_variant(
-            self,
-            _name: &'static str,
-            _variant_index: u32,
-            variant: &'static str,
-        ) -> Result<Self::Ok, Self::Error> {
-            Ok(TestValue::String(variant.to_string()))
-        }
-
-        fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
-            Ok(TestMapSerializer::default())
-        }
-
-        fn serialize_struct(
-            self,
-            _name: &'static str,
-            _len: usize,
-        ) -> Result<Self::SerializeStruct, Self::Error> {
-            Ok(TestMapSerializer::default())
-        }
-
-        fn serialize_struct_variant(
-            self,
-            _name: &'static str,
-            _variant_index: u32,
-            variant: &'static str,
-            _len: usize,
-        ) -> Result<Self::SerializeStructVariant, Self::Error> {
-            let mut serializer = TestMapSerializer::default();
-            serializer
-                .entries
-                .insert("type".to_string(), TestValue::String(variant.to_string()));
-            Ok(serializer)
-        }
-
-        fn serialize_i8(self, _value: i8) -> Result<Self::Ok, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_i16(self, _value: i16) -> Result<Self::Ok, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_i32(self, _value: i32) -> Result<Self::Ok, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_i64(self, _value: i64) -> Result<Self::Ok, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_u8(self, value: u8) -> Result<Self::Ok, Self::Error> {
-            Ok(TestValue::U64(u64::from(value)))
-        }
-
-        fn serialize_f32(self, _value: f32) -> Result<Self::Ok, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_f64(self, _value: f64) -> Result<Self::Ok, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_char(self, _value: char) -> Result<Self::Ok, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_bytes(self, _value: &[u8]) -> Result<Self::Ok, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_some<T: ?Sized + Serialize>(
-            self,
-            _value: &T,
-        ) -> Result<Self::Ok, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_unit_struct(self, _name: &'static str) -> Result<Self::Ok, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_newtype_struct<T: ?Sized + Serialize>(
-            self,
-            _name: &'static str,
-            _value: &T,
-        ) -> Result<Self::Ok, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_newtype_variant<T: ?Sized + Serialize>(
-            self,
-            _name: &'static str,
-            _variant_index: u32,
-            _variant: &'static str,
-            _value: &T,
-        ) -> Result<Self::Ok, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_tuple_struct(
-            self,
-            _name: &'static str,
-            _len: usize,
-        ) -> Result<Self::SerializeTupleStruct, Self::Error> {
-            unsupported()
-        }
-
-        fn serialize_tuple_variant(
-            self,
-            _name: &'static str,
-            _variant_index: u32,
-            _variant: &'static str,
-            _len: usize,
-        ) -> Result<Self::SerializeTupleVariant, Self::Error> {
-            unsupported()
-        }
-    }
-
-    #[derive(Default)]
-    struct TestMapSerializer {
-        entries: BTreeMap<String, TestValue>,
-        pending_key: Option<String>,
-    }
-
-    impl SerializeMap for TestMapSerializer {
-        type Ok = TestValue;
-        type Error = TestSerdeError;
-
-        fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<(), Self::Error> {
-            let key = key.serialize(TestSerializer)?;
-            let TestValue::String(key) = key else {
-                return Err(TestSerdeError("map key must be a string".to_string()));
-            };
-            self.pending_key = Some(key);
-            Ok(())
-        }
-
-        fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
-            let key = self
-                .pending_key
-                .take()
-                .ok_or_else(|| TestSerdeError("missing map key".to_string()))?;
-            self.entries.insert(key, value.serialize(TestSerializer)?);
-            Ok(())
-        }
-
-        fn end(self) -> Result<Self::Ok, Self::Error> {
-            Ok(TestValue::Map(self.entries))
-        }
-    }
-
-    impl SerializeStruct for TestMapSerializer {
-        type Ok = TestValue;
-        type Error = TestSerdeError;
-
-        fn serialize_field<T: ?Sized + Serialize>(
-            &mut self,
-            key: &'static str,
-            value: &T,
-        ) -> Result<(), Self::Error> {
-            self.entries
-                .insert(key.to_string(), value.serialize(TestSerializer)?);
-            Ok(())
-        }
-
-        fn end(self) -> Result<Self::Ok, Self::Error> {
-            Ok(TestValue::Map(self.entries))
-        }
-    }
-
-    impl SerializeStructVariant for TestMapSerializer {
-        type Ok = TestValue;
-        type Error = TestSerdeError;
-
-        fn serialize_field<T: ?Sized + Serialize>(
-            &mut self,
-            key: &'static str,
-            value: &T,
-        ) -> Result<(), Self::Error> {
-            self.entries
-                .insert(key.to_string(), value.serialize(TestSerializer)?);
-            Ok(())
-        }
-
-        fn end(self) -> Result<Self::Ok, Self::Error> {
-            Ok(TestValue::Map(self.entries))
-        }
-    }
-
-    impl<'de> IntoDeserializer<'de, TestSerdeError> for TestValue {
-        type Deserializer = TestDeserializer;
-
-        fn into_deserializer(self) -> Self::Deserializer {
-            TestDeserializer(self)
-        }
-    }
-
-    struct TestDeserializer(TestValue);
-
-    impl<'de> de::Deserializer<'de> for TestDeserializer {
-        type Error = TestSerdeError;
-
-        fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-            match self.0 {
-                TestValue::String(value) => visitor.visit_string(value),
-                TestValue::U64(value) => visitor.visit_u64(value),
-                TestValue::Bool(value) => visitor.visit_bool(value),
-                TestValue::Map(values) => visitor.visit_map(TestMapAccess {
-                    entries: values.into_iter().collect(),
-                }),
-            }
-        }
-
-        fn deserialize_enum<V: Visitor<'de>>(
-            self,
-            name: &'static str,
-            variants: &'static [&'static str],
-            visitor: V,
-        ) -> Result<V::Value, Self::Error> {
-            match self.0 {
-                TestValue::String(value) => value
-                    .into_deserializer()
-                    .deserialize_enum(name, variants, visitor),
-                value => TestDeserializer(value).deserialize_any(visitor),
-            }
-        }
-
-        serde::forward_to_deserialize_any! {
-            bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string bytes byte_buf option
-            unit unit_struct newtype_struct seq tuple tuple_struct map struct identifier
-            ignored_any
-        }
-    }
-
-    struct TestMapAccess {
-        entries: Vec<(String, TestValue)>,
-    }
-
-    impl<'de> MapAccess<'de> for TestMapAccess {
-        type Error = TestSerdeError;
-
-        fn next_key_seed<K: DeserializeSeed<'de>>(
-            &mut self,
-            seed: K,
-        ) -> Result<Option<K::Value>, Self::Error> {
-            let Some((key, _)) = self.entries.first() else {
-                return Ok(None);
-            };
-            seed.deserialize(key.clone().into_deserializer()).map(Some)
-        }
-
-        fn next_value_seed<V: DeserializeSeed<'de>>(
-            &mut self,
-            seed: V,
-        ) -> Result<V::Value, Self::Error> {
-            let (_, value) = self.entries.remove(0);
-            seed.deserialize(value.into_deserializer())
-        }
-    }
-
-    fn legacy_account_value() -> TestValue {
-        TestValue::Map(BTreeMap::from([
-            ("id".to_string(), TestValue::String("account-1".to_string())),
-            (
-                "display_name".to_string(),
-                TestValue::String("Legacy Mail".to_string()),
-            ),
-            (
-                "email".to_string(),
-                TestValue::String("user@example.com".to_string()),
-            ),
-            (
-                "imap_host".to_string(),
-                TestValue::String("imap.example.com".to_string()),
-            ),
-            ("imap_port".to_string(), TestValue::U64(993)),
-            ("imap_tls".to_string(), TestValue::Bool(true)),
-            (
-                "smtp_host".to_string(),
-                TestValue::String("smtp.example.com".to_string()),
-            ),
-            ("smtp_port".to_string(), TestValue::U64(465)),
-            ("smtp_tls".to_string(), TestValue::Bool(true)),
-            ("sync_enabled".to_string(), TestValue::Bool(true)),
-            (
-                "created_at".to_string(),
-                TestValue::String("2026-05-06T00:00:00Z".to_string()),
-            ),
-            (
-                "updated_at".to_string(),
-                TestValue::String("2026-05-06T00:00:00Z".to_string()),
-            ),
-        ]))
-    }
-
-    fn deserialize_account(value: TestValue) -> MailAccount {
-        MailAccount::deserialize(MapAccessDeserializer::new(TestMapAccess {
-            entries: match value {
-                TestValue::Map(values) => values.into_iter().collect(),
-                _ => panic!("expected map"),
-            },
-        }))
-        .unwrap()
-    }
 
     #[test]
     fn legacy_mail_account_defaults_to_generic_password_auth() {
-        let account = deserialize_account(legacy_account_value());
+        let account: MailAccount = serde_json::from_value(serde_json::json!({
+            "id": "account-1",
+            "display_name": "Legacy Mail",
+            "email": "user@example.com",
+            "imap_host": "imap.example.com",
+            "imap_port": 993,
+            "imap_tls": true,
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 465,
+            "smtp_tls": true,
+            "sync_enabled": true,
+            "created_at": "2026-05-06T00:00:00Z",
+            "updated_at": "2026-05-06T00:00:00Z"
+        }))
+        .unwrap();
 
         assert_eq!(account.provider, MailProvider::GenericImapSmtp);
         assert_eq!(
@@ -849,24 +446,24 @@ mod tests {
         assert!(account.is_password_auth());
         assert!(!account.is_oauth_auth());
 
-        let serialized = account.serialize(TestSerializer).unwrap();
+        let serialized = serde_json::to_value(&account).unwrap();
 
         assert_eq!(
-            serialized.get("provider").and_then(TestValue::as_str),
+            serialized.get("provider").and_then(|value| value.as_str()),
             Some("generic_imap_smtp")
         );
         assert_eq!(
             serialized
                 .get("auth")
                 .and_then(|auth| auth.get("type"))
-                .and_then(TestValue::as_str),
+                .and_then(|value| value.as_str()),
             Some("password")
         );
         assert_eq!(
             serialized
                 .get("auth")
                 .and_then(|auth| auth.get("password"))
-                .and_then(TestValue::as_str),
+                .and_then(|value| value.as_str()),
             Some("")
         );
     }
@@ -894,8 +491,8 @@ mod tests {
             updated_at: "2026-05-06T00:00:00Z".to_string(),
         };
 
-        let serialized = account.serialize(TestSerializer).unwrap();
-        let deserialized = deserialize_account(serialized);
+        let serialized = serde_json::to_string(&account).unwrap();
+        let deserialized: MailAccount = serde_json::from_str(&serialized).unwrap();
 
         assert_eq!(deserialized, account);
         assert!(deserialized.is_oauth_auth());

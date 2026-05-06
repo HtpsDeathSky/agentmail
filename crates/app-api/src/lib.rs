@@ -7,10 +7,10 @@ use mail_core::{
     new_id, now_plus_seconds_rfc3339, now_rfc3339, timestamp_is_future, ActionAuditStatus,
     AiAnalysisInput, AiInsight, AiSettings, AiSettingsView, ConnectionSettings,
     ConnectionTestResult, FolderRole, FolderWatchOutcome, MailAccount, MailActionAudit,
-    MailActionKind, MailActionRequest, MailActionResult, MailActionResultKind, MailFolder,
-    MailMessage, MessageFetchRequest, MessageQuery, PendingActionStatus, PendingMailAction,
-    RemoteMailAction, SaveAiSettingsRequest, SendMessageDraft, SendMessageResult, SyncState,
-    SyncStateKind,
+    MailActionKind, MailActionRequest, MailActionResult, MailActionResultKind, MailAuth,
+    MailFolder, MailMessage, MailProvider, MessageFetchRequest, MessageQuery, PendingActionStatus,
+    PendingMailAction, RemoteMailAction, SaveAiSettingsRequest, SendMessageDraft,
+    SendMessageResult, SyncState, SyncStateKind,
 };
 use mail_protocol::{validate_mailbox_address, LiveMailProtocol, MailProtocol, ProtocolError};
 use mail_store::{MailStore, MessageFlagPatch, StoreError};
@@ -152,6 +152,10 @@ impl AppApi {
                 .unwrap_or_else(new_id),
             display_name: request.display_name,
             email,
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: request.password.clone(),
+            },
             imap_host: request.imap_host,
             imap_port: request.imap_port,
             imap_tls: request.imap_tls,

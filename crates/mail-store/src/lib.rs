@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use mail_core::{
     now_rfc3339, ActionAuditStatus, AiInsight, AiSettings, AttachmentRef, FolderRole, MailAccount,
-    MailActionAudit, MailActionKind, MailFolder, MailMessage, MessageFlags, MessageQuery,
-    PendingActionStatus, PendingMailAction, SyncState, SyncStateKind,
+    MailActionAudit, MailActionKind, MailAuth, MailFolder, MailMessage, MailProvider, MessageFlags,
+    MessageQuery, PendingActionStatus, PendingMailAction, SyncState, SyncStateKind,
 };
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
@@ -1386,6 +1386,10 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<MailAccount> {
         id: row.get(0)?,
         display_name: row.get(1)?,
         email: row.get(2)?,
+        provider: MailProvider::GenericImapSmtp,
+        auth: MailAuth::Password {
+            password: String::new(),
+        },
         imap_host: row.get(3)?,
         imap_port: row.get::<_, i64>(4)? as u16,
         imap_tls: row.get(5)?,
@@ -1658,6 +1662,10 @@ mod tests {
             id: "acct".to_string(),
             display_name: "Ops".to_string(),
             email: "ops@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: String::new(),
+            },
             imap_host: "imap.example.com".to_string(),
             imap_port: 993,
             imap_tls: true,
@@ -1713,6 +1721,10 @@ mod tests {
             id: "acct".to_string(),
             display_name: "Ops".to_string(),
             email: "ops@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: String::new(),
+            },
             imap_host: "imap.example.com".to_string(),
             imap_port: 993,
             imap_tls: true,
@@ -1798,6 +1810,10 @@ mod tests {
             id: "acct".to_string(),
             display_name: "Ops".to_string(),
             email: "ops@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: String::new(),
+            },
             imap_host: "imap.example.com".to_string(),
             imap_port: 993,
             imap_tls: true,
@@ -1902,6 +1918,10 @@ mod tests {
             id: "acct".to_string(),
             display_name: "Ops".to_string(),
             email: "ops@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: String::new(),
+            },
             imap_host: "imap.example.com".to_string(),
             imap_port: 993,
             imap_tls: true,
@@ -1954,6 +1974,10 @@ mod tests {
             id: "acct".to_string(),
             display_name: "Ops".to_string(),
             email: "ops@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: "imap-smtp-secret".to_string(),
+            },
             imap_host: "imap.example.com".to_string(),
             imap_port: 993,
             imap_tls: true,
@@ -1995,6 +2019,10 @@ mod tests {
             id: "acct".to_string(),
             display_name: "Ops".to_string(),
             email: "ops@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: String::new(),
+            },
             imap_host: "imap.example.com".to_string(),
             imap_port: 993,
             imap_tls: true,
@@ -2054,6 +2082,10 @@ mod tests {
             id: "acct".to_string(),
             display_name: "Ops".to_string(),
             email: "ops@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: String::new(),
+            },
             imap_host: "imap.example.com".to_string(),
             imap_port: 993,
             imap_tls: true,
@@ -2170,6 +2202,10 @@ mod tests {
             id: "acct".to_string(),
             display_name: "Ops".to_string(),
             email: "ops@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: String::new(),
+            },
             imap_host: "imap.example.com".to_string(),
             imap_port: 993,
             imap_tls: true,
@@ -2269,6 +2305,10 @@ mod tests {
             id: "acct".to_string(),
             display_name: "Ops".to_string(),
             email: "ops@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: String::new(),
+            },
             imap_host: "imap.example.com".to_string(),
             imap_port: 993,
             imap_tls: true,

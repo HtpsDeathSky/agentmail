@@ -988,6 +988,7 @@ fn sanitize_error(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mail_core::{MailAuth, MailProvider};
 
     #[test]
     fn parses_plain_text_message_with_attachment_metadata() {
@@ -995,6 +996,10 @@ mod tests {
             id: "acct".to_string(),
             display_name: "Ops".to_string(),
             email: "ops@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: String::new(),
+            },
             imap_host: "imap.example.com".to_string(),
             imap_port: 993,
             imap_tls: true,
@@ -1058,6 +1063,10 @@ mod tests {
             id: "acct".to_string(),
             display_name: "Ops".to_string(),
             email: "ops@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: String::new(),
+            },
             imap_host: "imap.example.com".to_string(),
             imap_port: 993,
             imap_tls: true,

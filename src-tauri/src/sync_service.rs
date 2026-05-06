@@ -176,12 +176,17 @@ impl ConsistencySyncService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mail_core::{MailAuth, MailProvider};
 
     fn account(id: &str, sync_enabled: bool) -> MailAccount {
         MailAccount {
             id: id.to_string(),
             display_name: id.to_string(),
             email: format!("{id}@example.com"),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: String::new(),
+            },
             imap_host: "imap.example.com".to_string(),
             imap_port: 993,
             imap_tls: true,
