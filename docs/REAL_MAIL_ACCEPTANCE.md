@@ -8,14 +8,28 @@ Use a disposable or dedicated test mailbox. Do not run destructive checks on a p
 - Use `pnpm`, not `npm` or `npx`.
 - IMAP must support TLS.
 - SMTP must use implicit TLS on port `465` or STARTTLS on port `587`.
+- Gmail internal testing requires `AGENTMAIL_GOOGLE_OAUTH_CLIENT_ID` from a Google OAuth desktop client.
 
 ## Setup
 
 1. Run `pnpm install`.
 2. Run `pnpm tauri:dev` on a machine with the required Tauri system dependencies.
-3. Add the test mailbox through `ACCOUNT LINK`.
+3. Add a non-Gmail test mailbox through `ACCOUNT LINK`, or use the Gmail flow below.
 4. Click `TEST` and confirm both IMAP and SMTP report OK.
 5. Save the account and let the initial sync finish.
+
+## Gmail Internal Acceptance
+
+- Set `AGENTMAIL_GOOGLE_OAUTH_CLIENT_ID` before starting the desktop app.
+- In configuration, choose provider `Gmail`.
+- Enter the Gmail address and a display name.
+- Click `SIGN IN WITH GOOGLE`.
+- Complete Google consent for the internal-test account.
+- Confirm the saved account uses `imap.gmail.com:993` and `smtp.gmail.com:465`.
+- Sync the Gmail account and confirm Inbox plus Gmail folders load through IMAP XOAUTH2.
+- Send a disposable test message and confirm it is delivered through SMTP XOAUTH2.
+- Reopen the app and confirm the Gmail account can sync again from stored OAuth state.
+- If token refresh fails, reauthorize the account and record the failure details.
 
 ## Desktop Startup Acceptance
 
@@ -61,4 +75,5 @@ Use a disposable or dedicated test mailbox. Do not run destructive checks on a p
 - Attachment files are not downloaded yet; only metadata is indexed.
 - Permanent delete is limited to messages already in Trash and should be tested only with disposable mail.
 - AI analysis is manual only; API keys and mailbox passwords are stored plaintext in SQLite for this MVP, and only masked AI keys are returned to the UI.
-- OAuth is not implemented; use provider app passwords where required.
+- Gmail OAuth is available for internal testing only. Public release still requires Google OAuth consent setup and app verification.
+- Gmail callback completion still needs hardening before public release.
