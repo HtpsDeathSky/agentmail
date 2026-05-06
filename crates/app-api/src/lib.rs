@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use ai_remote::{validate_remote_base_url, AiProvider, OpenAiCompatibleProvider};
+use base64::Engine;
 use mail_core::{
     new_id, now_plus_seconds_rfc3339, now_rfc3339, timestamp_is_future, ActionAuditStatus,
     AiAnalysisInput, AiInsight, AiSettings, AiSettingsView, ConnectionSettings,
@@ -16,6 +17,7 @@ use mail_protocol::{validate_mailbox_address, LiveMailProtocol, MailProtocol, Pr
 use mail_store::{MailStore, MessageFlagPatch, StoreError};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -47,11 +49,26 @@ pub struct AppApi {
     protocol: Arc<dyn MailProtocol>,
     ai_provider: Arc<dyn AiProvider>,
     sync_locks: Arc<Mutex<HashSet<String>>>,
+    google_oauth: GoogleOAuthConfig,
+    google_oauth_sessions: Arc<Mutex<HashMap<String, GoogleOAuthSession>>>,
 }
 
 struct FolderSyncOutcome {
     message_count: u32,
     last_uid: Option<String>,
+}
+
+#[derive(Clone)]
+struct GoogleOAuthConfig {
+    client_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GoogleOAuthSession {
+    email: String,
+    display_name: String,
+    code_verifier: String,
+    redirect_uri: String,
 }
 
 impl AppApi {
@@ -68,12 +85,44 @@ impl AppApi {
         protocol: Arc<dyn MailProtocol>,
         ai_provider: Arc<dyn AiProvider>,
     ) -> Self {
+        Self::new_with_ai_provider_and_google_oauth_client_id(
+            store,
+            protocol,
+            ai_provider,
+            google_oauth_client_id_from_env(),
+        )
+    }
+
+    fn new_with_ai_provider_and_google_oauth_client_id(
+        store: MailStore,
+        protocol: Arc<dyn MailProtocol>,
+        ai_provider: Arc<dyn AiProvider>,
+        google_oauth_client_id: Option<String>,
+    ) -> Self {
         Self {
             store,
             protocol,
             ai_provider,
             sync_locks: Arc::new(Mutex::new(HashSet::new())),
+            google_oauth: GoogleOAuthConfig {
+                client_id: google_oauth_client_id,
+            },
+            google_oauth_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    #[cfg(test)]
+    fn new_with_google_oauth_client_id_for_tests(
+        store: MailStore,
+        protocol: Arc<dyn MailProtocol>,
+        google_oauth_client_id: Option<String>,
+    ) -> Self {
+        Self::new_with_ai_provider_and_google_oauth_client_id(
+            store,
+            protocol,
+            Arc::new(OpenAiCompatibleProvider::default()),
+            google_oauth_client_id,
+        )
     }
 
     pub fn new_default(db_path: impl AsRef<Path>) -> ApiResult<Self> {
@@ -181,6 +230,111 @@ impl AppApi {
                 None,
             )?;
         }
+        Ok(account)
+    }
+
+    pub fn start_google_oauth(
+        &self,
+        request: GmailOAuthStartRequest,
+    ) -> ApiResult<GmailOAuthStartResult> {
+        let client_id = self.google_oauth_client_id()?;
+        let email = normalize_email_address(&request.email)?;
+        let display_name = required_trimmed(request.display_name, "display_name")?;
+        let verifier_id = new_id();
+        let state = new_id();
+        let code_verifier = pkce_code_verifier();
+        let code_challenge = pkce_code_challenge(&code_verifier);
+        let redirect_uri = google_oauth_redirect_uri(&verifier_id);
+
+        self.google_oauth_sessions.lock().insert(
+            verifier_id.clone(),
+            GoogleOAuthSession {
+                email: email.clone(),
+                display_name,
+                code_verifier,
+                redirect_uri: redirect_uri.clone(),
+            },
+        );
+
+        Ok(GmailOAuthStartResult {
+            authorization_url: google_oauth_authorization_url(
+                &client_id,
+                &redirect_uri,
+                &code_challenge,
+                &state,
+                &email,
+            ),
+            verifier_id,
+            redirect_uri,
+        })
+    }
+
+    pub async fn complete_google_oauth(
+        &self,
+        request: GmailOAuthCompleteRequest,
+    ) -> ApiResult<MailAccount> {
+        let client_id = self.google_oauth_client_id()?;
+        let session = self
+            .google_oauth_sessions
+            .lock()
+            .remove(&request.verifier_id)
+            .ok_or_else(|| {
+                ApiError::InvalidRequest("oauth verifier session not found".to_string())
+            })?;
+        let authorization_code =
+            required_trimmed(request.authorization_code, "authorization_code")?;
+        let token = exchange_google_oauth_code(
+            &client_id,
+            &session.redirect_uri,
+            &session.code_verifier,
+            &authorization_code,
+        )
+        .await?;
+        let refresh_token = token.refresh_token.ok_or_else(|| {
+            ApiError::InvalidRequest(
+                "google oauth response did not include refresh token".to_string(),
+            )
+        })?;
+        let account = gmail_oauth_account(
+            session.display_name,
+            session.email,
+            refresh_token,
+            token.access_token,
+            token.expires_in,
+        );
+        self.store.save_account(&account)?;
+        Ok(account)
+    }
+
+    pub async fn refresh_google_oauth(
+        &self,
+        request: GmailOAuthRefreshRequest,
+    ) -> ApiResult<MailAccount> {
+        let client_id = self.google_oauth_client_id()?;
+        let mut account = self.store.get_account(&request.account_id)?;
+        let refresh_token = match &account.auth {
+            MailAuth::GoogleOAuth { refresh_token, .. } if !refresh_token.is_empty() => {
+                refresh_token.clone()
+            }
+            MailAuth::GoogleOAuth { .. } => {
+                return Err(ApiError::InvalidRequest(
+                    "google oauth refresh token is missing".to_string(),
+                ));
+            }
+            MailAuth::Password { .. } => {
+                return Err(ApiError::InvalidRequest(
+                    "account does not use google oauth".to_string(),
+                ));
+            }
+        };
+        let token = refresh_google_oauth_token(&client_id, &refresh_token).await?;
+        account.auth = MailAuth::GoogleOAuth {
+            refresh_token,
+            access_token: token.access_token,
+            expires_at: now_plus_seconds_rfc3339(token.expires_in),
+        };
+        account.updated_at = now_rfc3339();
+        self.store.save_account(&account)?;
         Ok(account)
     }
 
@@ -1460,6 +1614,18 @@ impl AppApi {
         Ok(account_to_settings(account, password))
     }
 
+    fn google_oauth_client_id(&self) -> ApiResult<String> {
+        self.google_oauth
+            .client_id
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .ok_or_else(|| {
+                ApiError::InvalidRequest("AGENTMAIL_GOOGLE_OAUTH_CLIENT_ID is required".to_string())
+            })
+    }
+
     fn acquire_sync_lock(&self, account_id: &str) -> ApiResult<SyncLockGuard> {
         let key = format!("account:{account_id}");
         let mut locks = self.sync_locks.lock();
@@ -1495,6 +1661,30 @@ pub struct AddAccountRequest {
     pub smtp_host: String,
     pub smtp_port: u16,
     pub smtp_tls: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GmailOAuthStartRequest {
+    pub email: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GmailOAuthStartResult {
+    pub authorization_url: String,
+    pub verifier_id: String,
+    pub redirect_uri: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GmailOAuthCompleteRequest {
+    pub verifier_id: String,
+    pub authorization_code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GmailOAuthRefreshRequest {
+    pub account_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1631,6 +1821,150 @@ fn normalize_email_address(value: &str) -> ApiResult<String> {
     Ok(email)
 }
 
+fn google_oauth_client_id_from_env() -> Option<String> {
+    std::env::var("AGENTMAIL_GOOGLE_OAUTH_CLIENT_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn google_oauth_redirect_uri(_verifier_id: &str) -> String {
+    "http://127.0.0.1:53682/oauth/google/callback".to_string()
+}
+
+fn google_oauth_authorization_url(
+    client_id: &str,
+    redirect_uri: &str,
+    code_challenge: &str,
+    state: &str,
+    login_hint: &str,
+) -> String {
+    format!(
+        "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent&code_challenge_method=S256&code_challenge={}&state={}&login_hint={}",
+        form_encode(client_id),
+        form_encode(redirect_uri),
+        form_encode("https://mail.google.com/"),
+        form_encode(code_challenge),
+        form_encode(state),
+        form_encode(login_hint),
+    )
+}
+
+fn pkce_code_verifier() -> String {
+    format!("{}{}", new_id(), new_id())
+}
+
+fn pkce_code_challenge(verifier: &str) -> String {
+    let digest = Sha256::digest(verifier.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+}
+
+fn gmail_oauth_account(
+    display_name: String,
+    email: String,
+    refresh_token: String,
+    access_token: String,
+    expires_in: i64,
+) -> MailAccount {
+    let now = now_rfc3339();
+    MailAccount {
+        id: new_id(),
+        display_name,
+        email,
+        provider: MailProvider::Gmail,
+        auth: MailAuth::GoogleOAuth {
+            refresh_token,
+            access_token,
+            expires_at: now_plus_seconds_rfc3339(expires_in),
+        },
+        imap_host: "imap.gmail.com".to_string(),
+        imap_port: 993,
+        imap_tls: true,
+        smtp_host: "smtp.gmail.com".to_string(),
+        smtp_port: 465,
+        smtp_tls: true,
+        sync_enabled: true,
+        created_at: now.clone(),
+        updated_at: now,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleOAuthTokenResponse {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    expires_in: i64,
+}
+
+async fn exchange_google_oauth_code(
+    client_id: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+    authorization_code: &str,
+) -> ApiResult<GoogleOAuthTokenResponse> {
+    post_google_oauth_form(&[
+        ("client_id", client_id),
+        ("code", authorization_code),
+        ("code_verifier", code_verifier),
+        ("grant_type", "authorization_code"),
+        ("redirect_uri", redirect_uri),
+    ])
+    .await
+}
+
+async fn refresh_google_oauth_token(
+    client_id: &str,
+    refresh_token: &str,
+) -> ApiResult<GoogleOAuthTokenResponse> {
+    post_google_oauth_form(&[
+        ("client_id", client_id),
+        ("refresh_token", refresh_token),
+        ("grant_type", "refresh_token"),
+    ])
+    .await
+}
+
+async fn post_google_oauth_form(form: &[(&str, &str)]) -> ApiResult<GoogleOAuthTokenResponse> {
+    let response = reqwest::Client::new()
+        .post("https://oauth2.googleapis.com/token")
+        .form(form)
+        .send()
+        .await
+        .map_err(|err| google_oauth_error(err.to_string()))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(google_oauth_error(format!(
+            "token endpoint returned {status}: {body}"
+        )));
+    }
+    response
+        .json()
+        .await
+        .map_err(|err| google_oauth_error(err.to_string()))
+}
+
+fn google_oauth_error(message: String) -> ApiError {
+    ApiError::InvalidRequest(format!("google oauth token exchange failed: {message}"))
+}
+
+fn form_encode(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => {
+                encoded.push('%');
+                encoded.push_str(&format!("{byte:02X}"));
+            }
+        }
+    }
+    encoded
+}
+
 fn require_message_uids(messages: &[MailMessage]) -> ApiResult<Vec<String>> {
     let mut uids = Vec::with_capacity(messages.len());
     for message in messages {
@@ -1765,6 +2099,73 @@ mod tests {
     use mail_protocol::MockMailProtocol;
     use mail_protocol::ProtocolResult;
     use mail_store::MailStore;
+
+    #[test]
+    fn gmail_account_uses_oauth_flow_instead_of_password_validation() {
+        let api = AppApi::new_with_google_oauth_client_id_for_tests(
+            MailStore::memory().unwrap(),
+            Arc::new(MockMailProtocol),
+            Some("test-client-id.apps.googleusercontent.com".to_string()),
+        );
+
+        let result = api
+            .start_google_oauth(GmailOAuthStartRequest {
+                email: "user@gmail.com".to_string(),
+                display_name: "User".to_string(),
+            })
+            .unwrap();
+
+        assert!(result.authorization_url.contains("accounts.google.com"));
+        assert!(result.authorization_url.contains("response_type=code"));
+        assert!(result
+            .authorization_url
+            .contains("scope=https%3A%2F%2Fmail.google.com%2F"));
+        assert!(result
+            .authorization_url
+            .contains("login_hint=user%40gmail.com"));
+        assert!(!result.verifier_id.is_empty());
+    }
+
+    #[test]
+    fn google_oauth_missing_client_id_is_rejected() {
+        let api = AppApi::new_with_google_oauth_client_id_for_tests(
+            MailStore::memory().unwrap(),
+            Arc::new(MockMailProtocol),
+            None,
+        );
+
+        let error = api
+            .start_google_oauth(GmailOAuthStartRequest {
+                email: "user@gmail.com".to_string(),
+                display_name: "User".to_string(),
+            })
+            .unwrap_err();
+
+        assert!(
+            matches!(error, ApiError::InvalidRequest(message) if message.contains("AGENTMAIL_GOOGLE_OAUTH_CLIENT_ID"))
+        );
+    }
+
+    #[test]
+    fn gmail_oauth_account_uses_gmail_preset_settings() {
+        let account = gmail_oauth_account(
+            "User".to_string(),
+            "user@gmail.com".to_string(),
+            "refresh-token".to_string(),
+            "access-token".to_string(),
+            3600,
+        );
+
+        assert_eq!(account.provider, MailProvider::Gmail);
+        assert!(matches!(account.auth, MailAuth::GoogleOAuth { .. }));
+        assert_eq!(account.imap_host, "imap.gmail.com");
+        assert_eq!(account.imap_port, 993);
+        assert!(account.imap_tls);
+        assert_eq!(account.smtp_host, "smtp.gmail.com");
+        assert_eq!(account.smtp_port, 465);
+        assert!(account.smtp_tls);
+        assert!(account.sync_enabled);
+    }
 
     #[test]
     fn direct_sent_remote_copy_match_requires_fallback_remote_not_older() {

@@ -7,8 +7,9 @@ mod sync_service;
 use std::sync::Arc;
 
 use app_api::{
-    AccountConfigView, AddAccountRequest, AppApi, SaveAccountConfigRequest, SyncSummary,
-    TestConnectionRequest,
+    AccountConfigView, AddAccountRequest, AppApi, GmailOAuthCompleteRequest,
+    GmailOAuthRefreshRequest, GmailOAuthStartRequest, GmailOAuthStartResult,
+    SaveAccountConfigRequest, SyncSummary, TestConnectionRequest,
 };
 use idle_watchers::{start_account_watchers_for_api, WatcherRegistry};
 use mail_core::{
@@ -64,6 +65,38 @@ async fn save_account_config(
     state
         .api
         .save_account_config(request)
+        .await
+        .map_err(to_error)
+}
+
+#[tauri::command]
+fn start_google_oauth(
+    state: State<'_, ApiState>,
+    request: GmailOAuthStartRequest,
+) -> Result<GmailOAuthStartResult, String> {
+    state.api.start_google_oauth(request).map_err(to_error)
+}
+
+#[tauri::command]
+async fn complete_google_oauth(
+    state: State<'_, ApiState>,
+    request: GmailOAuthCompleteRequest,
+) -> Result<MailAccount, String> {
+    state
+        .api
+        .complete_google_oauth(request)
+        .await
+        .map_err(to_error)
+}
+
+#[tauri::command]
+async fn refresh_google_oauth(
+    state: State<'_, ApiState>,
+    request: GmailOAuthRefreshRequest,
+) -> Result<MailAccount, String> {
+    state
+        .api
+        .refresh_google_oauth(request)
         .await
         .map_err(to_error)
 }
@@ -265,6 +298,9 @@ fn main() {
             list_accounts,
             get_account_config,
             save_account_config,
+            start_google_oauth,
+            complete_google_oauth,
+            refresh_google_oauth,
             sync_account,
             run_foreground_sync,
             start_account_watchers,
