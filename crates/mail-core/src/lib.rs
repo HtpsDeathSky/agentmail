@@ -323,6 +323,22 @@ pub struct SendMessageResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ConnectionAuth {
+    Password { password: String },
+    GoogleOAuth { access_token: String },
+}
+
+impl ConnectionAuth {
+    pub fn is_present(&self) -> bool {
+        match self {
+            Self::Password { password } => !password.is_empty(),
+            Self::GoogleOAuth { access_token } => !access_token.is_empty(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConnectionSettings {
     pub account_id: Option<String>,
     pub email: String,
@@ -332,7 +348,7 @@ pub struct ConnectionSettings {
     pub smtp_host: String,
     pub smtp_port: u16,
     pub smtp_tls: bool,
-    pub password: String,
+    pub auth: ConnectionAuth,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
