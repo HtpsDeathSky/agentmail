@@ -288,55 +288,27 @@ impl MailStore {
         account: &MailAccount,
         password: &str,
     ) -> StoreResult<()> {
-        let conn = self.conn.lock();
-        conn.execute(
-            r#"
-            INSERT INTO accounts (
-              id, display_name, email, provider, auth_kind, password, oauth_refresh_token,
-              oauth_access_token, oauth_expires_at, imap_host, imap_port, imap_tls,
-              smtp_host, smtp_port, smtp_tls, sync_enabled, created_at, updated_at
-            )
-            VALUES (?1, ?2, ?3, 'generic_imap_smtp', 'password', ?4, NULL, NULL, NULL, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-            ON CONFLICT(id) DO UPDATE SET
-              display_name=excluded.display_name,
-              email=excluded.email,
-              provider=excluded.provider,
-              auth_kind=excluded.auth_kind,
-              password=excluded.password,
-              oauth_refresh_token=excluded.oauth_refresh_token,
-              oauth_access_token=excluded.oauth_access_token,
-              oauth_expires_at=excluded.oauth_expires_at,
-              imap_host=excluded.imap_host,
-              imap_port=excluded.imap_port,
-              imap_tls=excluded.imap_tls,
-              smtp_host=excluded.smtp_host,
-              smtp_port=excluded.smtp_port,
-              smtp_tls=excluded.smtp_tls,
-              sync_enabled=excluded.sync_enabled,
-              updated_at=excluded.updated_at
-            "#,
-            params![
-                account.id,
-                account.display_name,
-                account.email,
-                password,
-                account.imap_host,
-                account.imap_port,
-                account.imap_tls,
-                account.smtp_host,
-                account.smtp_port,
-                account.smtp_tls,
-                account.sync_enabled,
-                account.created_at,
-                account.updated_at,
-            ],
-        )?;
-        Ok(())
+        self.save_account_storage(
+            account,
+            MailProvider::GenericImapSmtp,
+            "password",
+            Some(password),
+            None,
+            None,
+            None,
+        )
     }
 
-    pub fn save_account(&self, account: &MailAccount) -> StoreResult<()> {
-        let (auth_kind, password, oauth_refresh_token, oauth_access_token, oauth_expires_at) =
-            auth_storage_values(&account.auth);
+    fn save_account_storage(
+        &self,
+        account: &MailAccount,
+        provider: MailProvider,
+        auth_kind: &'static str,
+        password: Option<&str>,
+        oauth_refresh_token: Option<&str>,
+        oauth_access_token: Option<&str>,
+        oauth_expires_at: Option<&str>,
+    ) -> StoreResult<()> {
         let conn = self.conn.lock();
         conn.execute(
             r#"
@@ -368,7 +340,7 @@ impl MailStore {
                 account.id,
                 account.display_name,
                 account.email,
-                provider_to_str(account.provider),
+                provider_to_str(provider),
                 auth_kind,
                 password,
                 oauth_refresh_token,
@@ -388,12 +360,26 @@ impl MailStore {
         Ok(())
     }
 
+    pub fn save_account(&self, account: &MailAccount) -> StoreResult<()> {
+        let (auth_kind, password, oauth_refresh_token, oauth_access_token, oauth_expires_at) =
+            auth_storage_values(&account.auth);
+        self.save_account_storage(
+            account,
+            account.provider,
+            auth_kind,
+            password,
+            oauth_refresh_token,
+            oauth_access_token,
+            oauth_expires_at,
+        )
+    }
+
     pub fn list_accounts(&self) -> StoreResult<Vec<MailAccount>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             r#"
-            SELECT id, display_name, email, provider, auth_kind, password,
-                   oauth_refresh_token, oauth_access_token, oauth_expires_at,
+            SELECT id, display_name, email, provider, auth_kind, '',
+                   NULL, NULL, NULL,
                    imap_host, imap_port, imap_tls, smtp_host, smtp_port, smtp_tls,
                    sync_enabled, created_at, updated_at
             FROM accounts
@@ -1452,14 +1438,14 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<MailAccount> {
         id: row.get(0)?,
         display_name: row.get(1)?,
         email: row.get(2)?,
-        provider: provider_from_str(&provider),
+        provider: provider_from_str(&provider, 3)?,
         auth: auth_from_storage(
             &auth_kind,
             password,
             oauth_refresh_token,
             oauth_access_token,
             oauth_expires_at,
-        ),
+        )?,
         imap_host: row.get(9)?,
         imap_port: row.get::<_, i64>(10)? as u16,
         imap_tls: row.get(11)?,
@@ -1479,10 +1465,14 @@ fn provider_to_str(provider: MailProvider) -> &'static str {
     }
 }
 
-fn provider_from_str(provider: &str) -> MailProvider {
+fn provider_from_str(provider: &str, column_index: usize) -> rusqlite::Result<MailProvider> {
     match provider {
-        "gmail" => MailProvider::Gmail,
-        _ => MailProvider::GenericImapSmtp,
+        "gmail" => Ok(MailProvider::Gmail),
+        "generic_imap_smtp" => Ok(MailProvider::GenericImapSmtp),
+        _ => Err(invalid_account_storage_error(
+            column_index,
+            format!("invalid account provider: {provider}"),
+        )),
     }
 }
 
@@ -1517,15 +1507,30 @@ fn auth_from_storage(
     oauth_refresh_token: Option<String>,
     oauth_access_token: Option<String>,
     oauth_expires_at: Option<String>,
-) -> MailAuth {
+) -> rusqlite::Result<MailAuth> {
     match auth_kind {
-        "google_oauth" => MailAuth::GoogleOAuth {
+        "google_oauth" => Ok(MailAuth::GoogleOAuth {
             refresh_token: oauth_refresh_token.unwrap_or_default(),
             access_token: oauth_access_token.unwrap_or_default(),
             expires_at: oauth_expires_at.unwrap_or_default(),
-        },
-        _ => MailAuth::Password { password },
+        }),
+        "password" => Ok(MailAuth::Password { password }),
+        _ => Err(invalid_account_storage_error(
+            4,
+            format!("invalid account auth kind: {auth_kind}"),
+        )),
     }
+}
+
+fn invalid_account_storage_error(column_index: usize, message: String) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        column_index,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            message,
+        )),
+    )
 }
 
 fn folder_from_row(row: &Row<'_>) -> rusqlite::Result<MailFolder> {
@@ -2135,6 +2140,162 @@ mod tests {
             store.get_account_password(&account.id).unwrap(),
             "updated-secret"
         );
+    }
+
+    #[test]
+    fn list_accounts_redacts_auth_secrets() {
+        let store = MailStore::memory().unwrap();
+        let now = now_rfc3339();
+        let password_account = MailAccount {
+            id: "password-acct".to_string(),
+            display_name: "Password Ops".to_string(),
+            email: "ops@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: "stored-password".to_string(),
+            },
+            imap_host: "imap.example.com".to_string(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_port: 465,
+            smtp_tls: true,
+            sync_enabled: true,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        let gmail_account = MailAccount {
+            id: "gmail-acct".to_string(),
+            display_name: "Gmail Ops".to_string(),
+            email: "ops@gmail.com".to_string(),
+            provider: MailProvider::Gmail,
+            auth: MailAuth::GoogleOAuth {
+                refresh_token: "refresh-token".to_string(),
+                access_token: "access-token".to_string(),
+                expires_at: "2030-01-02T03:04:05Z".to_string(),
+            },
+            imap_host: "imap.gmail.com".to_string(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.gmail.com".to_string(),
+            smtp_port: 465,
+            smtp_tls: true,
+            sync_enabled: true,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+
+        store
+            .save_account_with_password(&password_account, "stored-password")
+            .unwrap();
+        store.save_account(&gmail_account).unwrap();
+
+        let accounts = store.list_accounts().unwrap();
+        let listed_password = accounts
+            .iter()
+            .find(|account| account.id == password_account.id)
+            .unwrap();
+        let listed_gmail = accounts
+            .iter()
+            .find(|account| account.id == gmail_account.id)
+            .unwrap();
+
+        assert_eq!(
+            listed_password.auth,
+            MailAuth::Password {
+                password: String::new(),
+            }
+        );
+        assert_eq!(
+            listed_gmail.auth,
+            MailAuth::GoogleOAuth {
+                refresh_token: String::new(),
+                access_token: String::new(),
+                expires_at: String::new(),
+            }
+        );
+
+        assert_eq!(
+            store.get_account_password(&password_account.id).unwrap(),
+            "stored-password"
+        );
+        assert_eq!(
+            store.get_account(&gmail_account.id).unwrap().auth,
+            gmail_account.auth
+        );
+    }
+
+    #[test]
+    fn invalid_account_auth_storage_is_rejected() {
+        let store = MailStore::memory().unwrap();
+        let now = now_rfc3339();
+        store
+            .conn
+            .lock()
+            .execute(
+                r#"
+                INSERT INTO accounts (
+                  id, display_name, email, provider, auth_kind, password,
+                  imap_host, imap_port, imap_tls, smtp_host, smtp_port, smtp_tls,
+                  sync_enabled, created_at, updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                "#,
+                params![
+                    "bad-auth",
+                    "Bad Auth",
+                    "ops@example.com",
+                    "future_provider",
+                    "future_auth",
+                    "stored-password",
+                    "imap.example.com",
+                    993,
+                    true,
+                    "smtp.example.com",
+                    465,
+                    true,
+                    true,
+                    now,
+                    now,
+                ],
+            )
+            .unwrap();
+
+        assert!(store.get_account("bad-auth").is_err());
+
+        store
+            .conn
+            .lock()
+            .execute(
+                r#"
+                INSERT INTO accounts (
+                  id, display_name, email, provider, auth_kind, password,
+                  imap_host, imap_port, imap_tls, smtp_host, smtp_port, smtp_tls,
+                  sync_enabled, created_at, updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                "#,
+                params![
+                    "bad-kind",
+                    "Bad Kind",
+                    "kind@example.com",
+                    "generic_imap_smtp",
+                    "future_auth",
+                    "stored-password",
+                    "imap.example.com",
+                    993,
+                    true,
+                    "smtp.example.com",
+                    465,
+                    true,
+                    true,
+                    now,
+                    now,
+                ],
+            )
+            .unwrap();
+
+        assert!(store.get_account("bad-kind").is_err());
     }
 
     #[test]
