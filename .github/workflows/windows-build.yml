@@ -5,13 +5,15 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
 
 jobs:
   build-windows:
     name: Build Windows Installer
     runs-on: windows-latest
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - name: Checkout
@@ -60,3 +62,33 @@ jobs:
             target/release/bundle/**
             src-tauri/target/release/bundle/**
           if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $bundleRoot = "src-tauri/target/release/bundle"
+          $assets = Get-ChildItem -Path $bundleRoot -Recurse -File |
+            Where-Object { $_.Extension -in ".exe", ".msi" } |
+            Select-Object -ExpandProperty FullName
+          if (-not $assets) {
+            throw "No Windows installer assets found under $bundleRoot"
+          }
+
+          $tag = "${{ github.ref_name }}"
+          $title = "AgentMail $tag"
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title $title --notes "Automated Windows installer build for $tag."
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }
+
+          gh release upload $tag $assets --clobber
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
