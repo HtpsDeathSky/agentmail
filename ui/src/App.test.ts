@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   clampWorkspaceSplitPercent,
+  canStartGoogleSignIn,
   getAccountProviderFormMode,
   getAppShellClassName,
+  inferAccountProvider,
   getWorkspaceSplitModel,
   runGoogleSignInFlow
 } from "./App";
@@ -68,6 +70,56 @@ describe("getAccountProviderFormMode", () => {
       showGoogleSignIn: true,
       testConnectionEnabled: false
     });
+  });
+});
+
+describe("inferAccountProvider", () => {
+  it("keeps legacy gmail-address accounts on generic IMAP/SMTP unless provider is Gmail", () => {
+    expect(
+      inferAccountProvider({
+        id: "legacy-gmail",
+        display_name: "Legacy Gmail",
+        email: "legacy@gmail.com",
+        provider: "generic_imap_smtp",
+        imap_host: "imap.gmail.com",
+        imap_port: 993,
+        imap_tls: true,
+        smtp_host: "smtp.gmail.com",
+        smtp_port: 465,
+        smtp_tls: true,
+        sync_enabled: true,
+        created_at: "2026-05-07T00:00:00.000Z",
+        updated_at: "2026-05-07T00:00:00.000Z"
+      })
+    ).toBe("generic_imap_smtp");
+  });
+
+  it("uses Gmail OAuth controls only for persisted Gmail provider accounts", () => {
+    expect(
+      inferAccountProvider({
+        id: "gmail-oauth",
+        display_name: "Gmail OAuth",
+        email: "user@gmail.com",
+        provider: "gmail",
+        imap_host: "imap.gmail.com",
+        imap_port: 993,
+        imap_tls: true,
+        smtp_host: "smtp.gmail.com",
+        smtp_port: 465,
+        smtp_tls: true,
+        sync_enabled: true,
+        created_at: "2026-05-07T00:00:00.000Z",
+        updated_at: "2026-05-07T00:00:00.000Z"
+      })
+    ).toBe("gmail");
+  });
+});
+
+describe("canStartGoogleSignIn", () => {
+  it("allows Google sign-in only while creating a new account", () => {
+    expect(canStartGoogleSignIn(null)).toBe(true);
+    expect(canStartGoogleSignIn(undefined)).toBe(true);
+    expect(canStartGoogleSignIn("existing-account")).toBe(false);
   });
 });
 

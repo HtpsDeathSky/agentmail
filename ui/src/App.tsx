@@ -1077,10 +1077,14 @@ function accountConfigToForm(config: AccountConfigView): SaveAccountConfigReques
   };
 }
 
-function inferAccountProvider(account: MailAccount | AccountConfigView | null | undefined): MailProvider {
+export function inferAccountProvider(account: MailAccount | AccountConfigView | null | undefined): MailProvider {
   if (!account) return "generic_imap_smtp";
-  if (account.provider === "gmail" || account.email.toLowerCase().endsWith("@gmail.com")) return "gmail";
+  if (account.provider === "gmail") return "gmail";
   return "generic_imap_smtp";
+}
+
+export function canStartGoogleSignIn(accountId: string | null | undefined) {
+  return !accountId;
 }
 
 function ConfigurationModal({
@@ -1191,6 +1195,10 @@ function ConfigurationModal({
   };
 
   const signInWithGoogle = async () => {
+    if (!canStartGoogleSignIn(accountForm.id)) {
+      setAccountStatus("google sign in creates a new account; choose NEW first");
+      return;
+    }
     setAccountBusy(true);
     setAccountStatus("opening browser for google sign in");
     try {
