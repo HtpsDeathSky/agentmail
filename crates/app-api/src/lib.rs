@@ -310,6 +310,84 @@ impl AppApi {
         Ok(account)
     }
 
+    pub async fn complete_google_oauth_from_loopback(
+        &self,
+        request: GmailOAuthLoopbackCompleteRequest,
+    ) -> ApiResult<MailAccount> {
+        let callback = parse_google_oauth_callback_url(&request.callback_url)?;
+        if let Some(error) = callback.error {
+            self.google_oauth_sessions
+                .lock()
+                .remove(&request.verifier_id);
+            return Err(ApiError::InvalidRequest(format!(
+                "google oauth error: {error}"
+            )));
+        }
+        self.complete_google_oauth(GmailOAuthCompleteRequest {
+            verifier_id: request.verifier_id,
+            authorization_code: callback.code,
+            state: callback.state,
+        })
+        .await
+    }
+
+    pub async fn wait_for_google_oauth_callback(
+        &self,
+        request: GmailOAuthWaitForCallbackRequest,
+    ) -> ApiResult<MailAccount> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:53682")
+            .await
+            .map_err(|error| {
+                ApiError::InvalidRequest(format!("oauth callback listener failed: {error}"))
+            })?;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(180), listener.accept())
+            .await
+            .map_err(|_| {
+                ApiError::InvalidRequest("google oauth timed out waiting for callback".to_string())
+            })?
+            .map_err(|error| {
+                ApiError::InvalidRequest(format!("oauth callback accept failed: {error}"))
+            })?;
+        let (mut stream, _) = result;
+        let mut buffer = vec![0_u8; 8192];
+        let bytes = tokio::io::AsyncReadExt::read(&mut stream, &mut buffer)
+            .await
+            .map_err(|error| {
+                ApiError::InvalidRequest(format!("oauth callback read failed: {error}"))
+            })?;
+        let request_line = std::str::from_utf8(&buffer[..bytes])
+            .ok()
+            .and_then(|request| request.lines().next())
+            .ok_or_else(|| {
+                ApiError::InvalidRequest("oauth callback request is invalid".to_string())
+            })?;
+        let path = request_line
+            .strip_prefix("GET ")
+            .and_then(|rest| rest.split_once(' ').map(|(path, _)| path.to_string()))
+            .ok_or_else(|| {
+                ApiError::InvalidRequest("oauth callback request line is invalid".to_string())
+            })?;
+        let callback_url = format!("http://127.0.0.1:53682{path}");
+        let account = self
+            .complete_google_oauth_from_loopback(GmailOAuthLoopbackCompleteRequest {
+                verifier_id: request.verifier_id,
+                callback_url,
+            })
+            .await;
+        let body = if account.is_ok() {
+            "AgentMail Google sign-in complete. You can close this tab."
+        } else {
+            "AgentMail Google sign-in failed. Return to the app and try again."
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await;
+        account
+    }
+
     pub async fn refresh_google_oauth(
         &self,
         request: GmailOAuthRefreshRequest,
@@ -1682,6 +1760,17 @@ pub struct GmailOAuthCompleteRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GmailOAuthLoopbackCompleteRequest {
+    pub verifier_id: String,
+    pub callback_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GmailOAuthWaitForCallbackRequest {
+    pub verifier_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GmailOAuthRefreshRequest {
     pub account_id: String,
 }
@@ -1873,6 +1962,50 @@ fn google_oauth_authorization_url(
     )
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct GoogleOAuthCallback {
+    code: String,
+    state: String,
+    error: Option<String>,
+}
+
+fn parse_google_oauth_callback_url(value: &str) -> ApiResult<GoogleOAuthCallback> {
+    let (_, query) = value
+        .split_once('?')
+        .ok_or_else(|| ApiError::InvalidRequest("oauth callback query is missing".to_string()))?;
+    let mut code = None;
+    let mut state = None;
+    let mut error = None;
+
+    for pair in query.split('&') {
+        let (key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
+        match key {
+            "code" => code = Some(form_decode(raw_value)?),
+            "state" => state = Some(form_decode(raw_value)?),
+            "error" => error = Some(form_decode(raw_value)?),
+            _ => {}
+        }
+    }
+
+    if let Some(error) = error {
+        return Ok(GoogleOAuthCallback {
+            code: String::new(),
+            state: state.unwrap_or_default(),
+            error: Some(error),
+        });
+    }
+
+    Ok(GoogleOAuthCallback {
+        code: code.filter(|value| !value.is_empty()).ok_or_else(|| {
+            ApiError::InvalidRequest("oauth callback code is missing".to_string())
+        })?,
+        state: state.filter(|value| !value.is_empty()).ok_or_else(|| {
+            ApiError::InvalidRequest("oauth callback state is missing".to_string())
+        })?,
+        error: None,
+    })
+}
+
 fn pkce_code_verifier() -> String {
     format!("{}{}", new_id(), new_id())
 }
@@ -1986,6 +2119,39 @@ fn form_encode(value: &str) -> String {
         }
     }
     encoded
+}
+
+fn form_decode(value: &str) -> ApiResult<String> {
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut chars = value.as_bytes().iter().copied();
+    while let Some(byte) = chars.next() {
+        match byte {
+            b'+' => bytes.push(b' '),
+            b'%' => {
+                let hi = chars.next().ok_or_else(|| {
+                    ApiError::InvalidRequest("invalid percent escape".to_string())
+                })?;
+                let lo = chars.next().ok_or_else(|| {
+                    ApiError::InvalidRequest("invalid percent escape".to_string())
+                })?;
+                bytes.push((hex_value(hi)? << 4) | hex_value(lo)?);
+            }
+            other => bytes.push(other),
+        }
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| ApiError::InvalidRequest("callback query is not utf8".to_string()))
+}
+
+fn hex_value(byte: u8) -> ApiResult<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(ApiError::InvalidRequest(
+            "invalid percent escape".to_string(),
+        )),
+    }
 }
 
 fn require_message_uids(messages: &[MailMessage]) -> ApiResult<Vec<String>> {
@@ -2122,6 +2288,48 @@ mod tests {
     use mail_protocol::MockMailProtocol;
     use mail_protocol::ProtocolResult;
     use mail_store::MailStore;
+
+    #[test]
+    fn parses_google_oauth_loopback_callback_url() {
+        let callback = parse_google_oauth_callback_url(
+            "http://127.0.0.1:53682/oauth/google/callback?code=auth%2Dcode&state=state%2Dvalue",
+        )
+        .unwrap();
+
+        assert_eq!(callback.code, "auth-code");
+        assert_eq!(callback.state, "state-value");
+        assert_eq!(callback.error, None);
+    }
+
+    #[tokio::test]
+    async fn google_oauth_loopback_completion_rejects_state_mismatch() {
+        let api = AppApi::new_with_google_oauth_client_id_for_tests(
+            MailStore::memory().unwrap(),
+            Arc::new(MockMailProtocol),
+            Some("test-client-id.apps.googleusercontent.com".to_string()),
+        );
+
+        let start = api
+            .start_google_oauth(GmailOAuthStartRequest {
+                email: "user@gmail.com".to_string(),
+                display_name: "User".to_string(),
+            })
+            .unwrap();
+
+        let error = api
+            .complete_google_oauth_from_loopback(GmailOAuthLoopbackCompleteRequest {
+                verifier_id: start.verifier_id,
+                callback_url:
+                    "http://127.0.0.1:53682/oauth/google/callback?code=auth-code&state=wrong-state"
+                        .to_string(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, ApiError::InvalidRequest(message) if message.contains("state mismatch"))
+        );
+    }
 
     #[test]
     fn gmail_account_uses_oauth_flow_instead_of_password_validation() {

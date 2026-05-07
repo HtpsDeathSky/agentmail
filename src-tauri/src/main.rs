@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use app_api::{
     AccountConfigView, AddAccountRequest, AppApi, GmailOAuthCompleteRequest,
-    GmailOAuthRefreshRequest, GmailOAuthStartRequest, GmailOAuthStartResult,
-    SaveAccountConfigRequest, SyncSummary, TestConnectionRequest,
+    GmailOAuthLoopbackCompleteRequest, GmailOAuthRefreshRequest, GmailOAuthStartRequest,
+    GmailOAuthStartResult, GmailOAuthWaitForCallbackRequest, SaveAccountConfigRequest, SyncSummary,
+    TestConnectionRequest,
 };
 use idle_watchers::{start_account_watchers_for_api, WatcherRegistry};
 use mail_core::{
@@ -85,6 +86,30 @@ async fn complete_google_oauth(
     state
         .api
         .complete_google_oauth(request)
+        .await
+        .map_err(to_error)
+}
+
+#[tauri::command]
+async fn complete_google_oauth_from_loopback(
+    state: State<'_, ApiState>,
+    request: GmailOAuthLoopbackCompleteRequest,
+) -> Result<MailAccount, String> {
+    state
+        .api
+        .complete_google_oauth_from_loopback(request)
+        .await
+        .map_err(to_error)
+}
+
+#[tauri::command]
+async fn wait_for_google_oauth_callback(
+    state: State<'_, ApiState>,
+    request: GmailOAuthWaitForCallbackRequest,
+) -> Result<MailAccount, String> {
+    state
+        .api
+        .wait_for_google_oauth_callback(request)
         .await
         .map_err(to_error)
 }
@@ -300,6 +325,8 @@ fn main() {
             save_account_config,
             start_google_oauth,
             complete_google_oauth,
+            complete_google_oauth_from_loopback,
+            wait_for_google_oauth_callback,
             refresh_google_oauth,
             sync_account,
             run_foreground_sync,
