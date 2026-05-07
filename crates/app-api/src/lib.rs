@@ -43,6 +43,9 @@ pub enum ApiError {
 
 pub type ApiResult<T> = Result<T, ApiError>;
 
+type GoogleTokenRefreshFn =
+    Arc<dyn Fn(String) -> ApiResult<GoogleOAuthTokenResponse> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct AppApi {
     store: MailStore,
@@ -51,6 +54,7 @@ pub struct AppApi {
     sync_locks: Arc<Mutex<HashSet<String>>>,
     google_oauth: GoogleOAuthConfig,
     google_oauth_sessions: Arc<Mutex<HashMap<String, GoogleOAuthSession>>>,
+    google_token_refresher: Option<GoogleTokenRefreshFn>,
 }
 
 struct FolderSyncOutcome {
@@ -109,6 +113,7 @@ impl AppApi {
                 client_id: google_oauth_client_id,
             },
             google_oauth_sessions: Arc::new(Mutex::new(HashMap::new())),
+            google_token_refresher: None,
         }
     }
 
@@ -124,6 +129,12 @@ impl AppApi {
             Arc::new(OpenAiCompatibleProvider::default()),
             google_oauth_client_id,
         )
+    }
+
+    #[cfg(test)]
+    fn with_google_token_refresher_for_tests(mut self, refresher: GoogleTokenRefreshFn) -> Self {
+        self.google_token_refresher = Some(refresher);
+        self
     }
 
     pub fn new_default(db_path: impl AsRef<Path>) -> ApiResult<Self> {
@@ -156,7 +167,7 @@ impl AppApi {
     ) -> ApiResult<ConnectionTestResult> {
         let settings = if let Some(account_id) = request.account_id {
             let account = self.store.get_account(&account_id)?;
-            self.connection_settings_for_account(&account)?
+            self.connection_settings_for_account(&account).await?
         } else {
             let manual = request
                 .manual
@@ -547,7 +558,7 @@ impl AppApi {
             self.converge_fallback_sent_placeholders(&account.id, &folder)?;
         }
 
-        let settings = self.connection_settings_for_account(&account)?;
+        let settings = self.connection_settings_for_account(&account).await?;
         let outcome = self.sync_one_folder(&settings, &account, &folder).await?;
         Ok(SyncSummary {
             account_id: account.id,
@@ -559,7 +570,7 @@ impl AppApi {
     }
 
     async fn sync_account_inner(&self, account: &MailAccount) -> ApiResult<SyncSummary> {
-        let settings = self.connection_settings_for_account(account)?;
+        let settings = self.connection_settings_for_account(account).await?;
         let folders = self.protocol.fetch_folders(&settings, account).await?;
         let mut message_count = 0_u32;
         let mut last_uid = None;
@@ -718,7 +729,7 @@ impl AppApi {
             ));
         }
 
-        let settings = self.connection_settings_for_account(&account)?;
+        let settings = self.connection_settings_for_account(&account).await?;
         let previous_state = self.store.get_sync_state(&account.id, Some(&folder.id))?;
         self.store.save_sync_state(&SyncState {
             account_id: account.id.clone(),
@@ -1153,7 +1164,7 @@ impl AppApi {
 
     async fn send_message_now(&self, draft: &SendMessageDraft) -> ApiResult<String> {
         let account = self.store.get_account(&draft.account_id)?;
-        let settings = self.connection_settings_for_account(&account)?;
+        let settings = self.connection_settings_for_account(&account).await?;
         self.protocol
             .send_message(&settings, draft)
             .await
@@ -1165,7 +1176,7 @@ impl AppApi {
         if !account.sync_enabled {
             return Ok(());
         }
-        let settings = self.connection_settings_for_account(&account)?;
+        let settings = self.connection_settings_for_account(&account).await?;
         let folders = self.protocol.fetch_folders(&settings, &account).await?;
         for folder in folders
             .into_iter()
@@ -1266,7 +1277,7 @@ impl AppApi {
             return Ok(());
         }
         let remote_action = self.build_remote_action(&account, request).await?;
-        let settings = self.connection_settings_for_account(&account)?;
+        let settings = self.connection_settings_for_account(&account).await?;
 
         if request.action == MailActionKind::PermanentDelete && remote_action.uids.is_empty() {
             self.apply_local_action(request, &remote_action)?;
@@ -1467,7 +1478,7 @@ impl AppApi {
         source_folder: &MailFolder,
         messages: &[MailMessage],
     ) -> ApiResult<Vec<String>> {
-        let settings = self.connection_settings_for_account(account)?;
+        let settings = self.connection_settings_for_account(account).await?;
         let remote_messages = self
             .protocol
             .fetch_messages(
@@ -1683,11 +1694,52 @@ impl AppApi {
         Ok(())
     }
 
-    fn connection_settings_for_account(
+    async fn connection_settings_for_account(
         &self,
         account: &MailAccount,
     ) -> ApiResult<ConnectionSettings> {
-        account_to_settings(account)
+        let account = self.refresh_google_oauth_if_needed(account).await?;
+        account_to_settings(&account)
+    }
+
+    async fn refresh_google_oauth_if_needed(
+        &self,
+        account: &MailAccount,
+    ) -> ApiResult<MailAccount> {
+        let MailAuth::GoogleOAuth {
+            refresh_token,
+            access_token,
+            expires_at,
+        } = &account.auth
+        else {
+            return Ok(account.clone());
+        };
+
+        if !gmail_access_token_needs_refresh(access_token, expires_at) {
+            return Ok(account.clone());
+        }
+        if refresh_token.is_empty() {
+            return Err(ApiError::InvalidRequest(
+                "google sign-in expired; sign in again".to_string(),
+            ));
+        }
+
+        let token = if let Some(refresher) = &self.google_token_refresher {
+            refresher(refresh_token.clone())?
+        } else {
+            let client_id = self.google_oauth_client_id()?;
+            refresh_google_oauth_token(&client_id, refresh_token).await?
+        };
+
+        let mut refreshed = account.clone();
+        refreshed.auth = MailAuth::GoogleOAuth {
+            refresh_token: refresh_token.clone(),
+            access_token: token.access_token,
+            expires_at: now_plus_seconds_rfc3339(token.expires_in),
+        };
+        refreshed.updated_at = now_rfc3339();
+        self.store.save_account(&refreshed)?;
+        Ok(refreshed)
     }
 
     fn google_oauth_client_id(&self) -> ApiResult<String> {
@@ -1892,6 +1944,13 @@ fn account_to_settings(account: &MailAccount) -> ApiResult<ConnectionSettings> {
         smtp_tls: account.smtp_tls,
         auth,
     })
+}
+
+fn gmail_access_token_needs_refresh(access_token: &str, expires_at: &str) -> bool {
+    if access_token.is_empty() || expires_at.is_empty() {
+        return true;
+    }
+    !timestamp_is_future(expires_at)
 }
 
 fn account_config_view(account: MailAccount, password: String) -> AccountConfigView {
@@ -2457,8 +2516,91 @@ mod tests {
         assert!(account.sync_enabled);
     }
 
-    #[test]
-    fn gmail_oauth_accounts_use_xoauth2_connection_settings() {
+    #[tokio::test]
+    async fn expired_gmail_token_refreshes_before_connection_settings() {
+        let api = AppApi::new_with_google_oauth_client_id_for_tests(
+            MailStore::memory().unwrap(),
+            Arc::new(MockMailProtocol),
+            Some("test-client-id.apps.googleusercontent.com".to_string()),
+        )
+        .with_google_token_refresher_for_tests(Arc::new(|refresh_token| {
+            assert_eq!(refresh_token, "refresh-token");
+            Ok(GoogleOAuthTokenResponse {
+                access_token: "fresh-access-token".to_string(),
+                expires_in: 3600,
+                refresh_token: None,
+            })
+        }));
+
+        let account = MailAccount {
+            id: "gmail-acct".to_string(),
+            display_name: "Gmail".to_string(),
+            email: "user@gmail.com".to_string(),
+            provider: MailProvider::Gmail,
+            auth: MailAuth::GoogleOAuth {
+                refresh_token: "refresh-token".to_string(),
+                access_token: "expired-access-token".to_string(),
+                expires_at: "2000-01-01T00:00:00Z".to_string(),
+            },
+            imap_host: "imap.gmail.com".to_string(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.gmail.com".to_string(),
+            smtp_port: 465,
+            smtp_tls: true,
+            sync_enabled: true,
+            created_at: "2026-05-07T00:00:00Z".to_string(),
+            updated_at: "2026-05-07T00:00:00Z".to_string(),
+        };
+        api.store.save_account(&account).unwrap();
+
+        let settings = api.connection_settings_for_account(&account).await.unwrap();
+
+        assert_eq!(
+            settings.auth,
+            ConnectionAuth::GoogleOAuth {
+                access_token: "fresh-access-token".to_string(),
+            }
+        );
+        let loaded = api.store.get_account("gmail-acct").unwrap();
+        assert!(matches!(
+            loaded.auth,
+            MailAuth::GoogleOAuth { access_token, .. } if access_token == "fresh-access-token"
+        ));
+    }
+
+    #[tokio::test]
+    async fn fresh_gmail_token_reuses_existing_access_token() {
+        let api = AppApi::new_with_google_oauth_client_id_for_tests(
+            MailStore::memory().unwrap(),
+            Arc::new(MockMailProtocol),
+            Some("test-client-id.apps.googleusercontent.com".to_string()),
+        )
+        .with_google_token_refresher_for_tests(Arc::new(|_| {
+            panic!("fresh token should not refresh");
+        }));
+
+        let account = gmail_oauth_account(
+            "User".to_string(),
+            "user@gmail.com".to_string(),
+            "refresh-token".to_string(),
+            "current-access-token".to_string(),
+            3600,
+        );
+        api.store.save_account(&account).unwrap();
+
+        let settings = api.connection_settings_for_account(&account).await.unwrap();
+
+        assert_eq!(
+            settings.auth,
+            ConnectionAuth::GoogleOAuth {
+                access_token: "current-access-token".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn gmail_oauth_accounts_use_xoauth2_connection_settings() {
         let api = AppApi::new_with_google_oauth_client_id_for_tests(
             MailStore::memory().unwrap(),
             Arc::new(MockMailProtocol),
@@ -2474,7 +2616,7 @@ mod tests {
         );
         api.store.save_account(&account).unwrap();
 
-        let settings = api.connection_settings_for_account(&account).unwrap();
+        let settings = api.connection_settings_for_account(&account).await.unwrap();
 
         assert_eq!(
             settings.auth,
