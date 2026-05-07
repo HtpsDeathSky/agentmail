@@ -258,6 +258,34 @@ const isSentFolderPath = (path: string) => {
   return ["sent", "sent mail", "sent messages", "sent items"].includes(name);
 };
 
+const completeDemoGoogleOAuth = (verifierId: string, state: string) => {
+  const session = gmailOAuthSessions[verifierId];
+  if (!session) throw new Error("oauth verifier session not found");
+  if (state !== session.state) {
+    delete gmailOAuthSessions[verifierId];
+    throw new Error("oauth state mismatch");
+  }
+  delete gmailOAuthSessions[verifierId];
+  const next: MailAccount = {
+    id: crypto.randomUUID(),
+    display_name: session.display_name,
+    email: session.email,
+    provider: "gmail",
+    imap_host: "imap.gmail.com",
+    imap_port: 993,
+    imap_tls: true,
+    smtp_host: "smtp.gmail.com",
+    smtp_port: 465,
+    smtp_tls: true,
+    sync_enabled: true,
+    created_at: now(),
+    updated_at: now()
+  };
+  accounts = [next, ...accounts];
+  recordAudit("mark_read", next.id, []);
+  return next;
+};
+
 export const demoBackend = {
   async invoke(command: string, args?: Record<string, unknown>): Promise<unknown> {
     await new Promise((resolve) => window.setTimeout(resolve, 120));
@@ -334,55 +362,13 @@ export const demoBackend = {
       }
       case "complete_google_oauth": {
         const request = args?.request as GmailOAuthCompleteRequest;
-        const session = gmailOAuthSessions[request.verifier_id];
-        if (!session) throw new Error("oauth verifier session not found");
-        if (request.state !== session.state) {
-          delete gmailOAuthSessions[request.verifier_id];
-          throw new Error("oauth state mismatch");
-        }
-        delete gmailOAuthSessions[request.verifier_id];
-        const next: MailAccount = {
-          id: crypto.randomUUID(),
-          display_name: session.display_name,
-          email: session.email,
-          provider: "gmail",
-          imap_host: "imap.gmail.com",
-          imap_port: 993,
-          imap_tls: true,
-          smtp_host: "smtp.gmail.com",
-          smtp_port: 465,
-          smtp_tls: true,
-          sync_enabled: true,
-          created_at: now(),
-          updated_at: now()
-        };
-        accounts = [next, ...accounts];
-        recordAudit("mark_read", next.id, []);
-        return next;
+        return completeDemoGoogleOAuth(request.verifier_id, request.state);
       }
       case "wait_for_google_oauth_callback": {
         const request = args?.request as { verifier_id: string };
         const session = gmailOAuthSessions[request.verifier_id];
         if (!session) throw new Error("oauth verifier session not found");
-        delete gmailOAuthSessions[request.verifier_id];
-        const next: MailAccount = {
-          id: crypto.randomUUID(),
-          display_name: session.display_name,
-          email: session.email,
-          provider: "gmail",
-          imap_host: "imap.gmail.com",
-          imap_port: 993,
-          imap_tls: true,
-          smtp_host: "smtp.gmail.com",
-          smtp_port: 465,
-          smtp_tls: true,
-          sync_enabled: true,
-          created_at: now(),
-          updated_at: now()
-        };
-        accounts = [next, ...accounts];
-        recordAudit("mark_read", next.id, []);
-        return next;
+        return completeDemoGoogleOAuth(request.verifier_id, session.state);
       }
       case "refresh_google_oauth": {
         const request = args?.request as GmailOAuthRefreshRequest;
