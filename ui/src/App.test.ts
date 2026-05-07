@@ -3,7 +3,8 @@ import {
   clampWorkspaceSplitPercent,
   getAccountProviderFormMode,
   getAppShellClassName,
-  getWorkspaceSplitModel
+  getWorkspaceSplitModel,
+  runGoogleSignInFlow
 } from "./App";
 import {
   refreshAfterMailSyncEvent,
@@ -67,6 +68,51 @@ describe("getAccountProviderFormMode", () => {
       showGoogleSignIn: true,
       testConnectionEnabled: false
     });
+  });
+});
+
+describe("runGoogleSignInFlow", () => {
+  it("opens the authorization URL and waits for the backend callback without prompting", async () => {
+    const account = {
+      id: "acct-gmail",
+      display_name: "Ops Gmail",
+      email: "ops@gmail.com",
+      provider: "gmail" as const,
+      imap_host: "imap.gmail.com",
+      imap_port: 993,
+      imap_tls: true,
+      smtp_host: "smtp.gmail.com",
+      smtp_port: 465,
+      smtp_tls: true,
+      sync_enabled: true,
+      created_at: "2026-05-06T00:00:00.000Z",
+      updated_at: "2026-05-06T00:00:00.000Z"
+    };
+    const startGoogleOAuth = vi.fn().mockResolvedValue({
+      authorization_url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=test",
+      verifier_id: "verifier-1",
+      redirect_uri: "http://127.0.0.1:45678/oauth/google/callback"
+    });
+    const waitForGoogleOAuthCallback = vi.fn().mockResolvedValue(account);
+    const openAuthorizationUrl = vi.fn();
+    const prompt = vi.spyOn(window, "prompt");
+
+    const result = await runGoogleSignInFlow({
+      email: "ops@gmail.com",
+      displayName: "",
+      startGoogleOAuth,
+      waitForGoogleOAuthCallback,
+      openAuthorizationUrl
+    });
+
+    expect(result).toBe(account);
+    expect(startGoogleOAuth).toHaveBeenCalledWith({
+      email: "ops@gmail.com",
+      display_name: "Gmail"
+    });
+    expect(openAuthorizationUrl).toHaveBeenCalledWith("https://accounts.google.com/o/oauth2/v2/auth?client_id=test");
+    expect(waitForGoogleOAuthCallback).toHaveBeenCalledWith({ verifier_id: "verifier-1" });
+    expect(prompt).not.toHaveBeenCalled();
   });
 });
 

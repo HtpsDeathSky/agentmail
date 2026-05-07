@@ -120,6 +120,10 @@ export interface GmailOAuthCompleteRequest {
   state: string;
 }
 
+export interface GmailOAuthWaitForCallbackRequest {
+  verifier_id: string;
+}
+
 export interface GmailOAuthRefreshRequest {
   account_id: string;
 }
@@ -233,6 +237,7 @@ type CommandMap = {
   save_account_config: MailAccount;
   start_google_oauth: GmailOAuthStartResult;
   complete_google_oauth: MailAccount;
+  wait_for_google_oauth_callback: MailAccount;
   refresh_google_oauth: MailAccount;
   sync_account: SyncSummary;
   run_foreground_sync: null;
@@ -269,6 +274,8 @@ export const api = {
   saveAccountConfig: (request: SaveAccountConfigRequest) => call("save_account_config", { request }),
   startGoogleOAuth: (request: GmailOAuthStartRequest) => call("start_google_oauth", { request }),
   completeGoogleOAuth: (request: GmailOAuthCompleteRequest) => call("complete_google_oauth", { request }),
+  waitForGoogleOAuthCallback: (request: GmailOAuthWaitForCallbackRequest) =>
+    call("wait_for_google_oauth_callback", { request }),
   refreshGoogleOAuth: (request: GmailOAuthRefreshRequest) => call("refresh_google_oauth", { request }),
   syncAccount: (accountId: string, reason = "manual_sync") => call("sync_account", { accountId, reason }),
   runForegroundSync: (selectedAccountId: string | null) => call("run_foreground_sync", { selectedAccountId }),

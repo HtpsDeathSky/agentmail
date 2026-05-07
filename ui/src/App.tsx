@@ -47,7 +47,7 @@ import {
   MailProvider,
   SaveAccountConfigRequest,
   SaveAiSettingsRequest,
-  SendMessageDraft,
+  SendMessageDraft
 } from "./api";
 import {
   applyThemeModeToDocument,
@@ -103,6 +103,29 @@ export function getAccountProviderFormMode(provider: MailProvider) {
     showGoogleSignIn: provider === "gmail",
     testConnectionEnabled: provider !== "gmail"
   };
+}
+
+export interface GoogleSignInFlowDeps {
+  email: string;
+  displayName: string;
+  startGoogleOAuth: typeof api.startGoogleOAuth;
+  waitForGoogleOAuthCallback: typeof api.waitForGoogleOAuthCallback;
+  openAuthorizationUrl: (url: string) => void;
+}
+
+export async function runGoogleSignInFlow({
+  email,
+  displayName,
+  startGoogleOAuth,
+  waitForGoogleOAuthCallback,
+  openAuthorizationUrl
+}: GoogleSignInFlowDeps): Promise<MailAccount> {
+  const start = await startGoogleOAuth({
+    email,
+    display_name: displayName || "Gmail"
+  });
+  openAuthorizationUrl(start.authorization_url);
+  return waitForGoogleOAuthCallback({ verifier_id: start.verifier_id });
 }
 
 export const MAIL_SYNC_EVENT = "agentmail-mail-sync";
@@ -1171,26 +1194,18 @@ function ConfigurationModal({
     setAccountBusy(true);
     setAccountStatus("opening browser for google sign in");
     try {
-      const start = await api.startGoogleOAuth({
+      const account = await runGoogleSignInFlow({
         email: accountForm.email,
-        display_name: accountForm.display_name || "Gmail"
+        displayName: accountForm.display_name,
+        startGoogleOAuth: api.startGoogleOAuth,
+        waitForGoogleOAuthCallback: api.waitForGoogleOAuthCallback,
+        openAuthorizationUrl: (url) => {
+          if (typeof window !== "undefined" && url) {
+            window.open(url, "_blank", "noopener,noreferrer");
+          }
+        }
       });
-      if (typeof window !== "undefined" && start.authorization_url) {
-        window.open(start.authorization_url, "_blank", "noopener,noreferrer");
-      }
-      setAccountStatus("waiting for google authorization code");
-      const code = window.prompt("Google authorization code");
-      if (!code) {
-        setAccountStatus("google sign in cancelled");
-        return;
-      }
-      const state = window.prompt("Google OAuth state") ?? "";
-      setAccountStatus("exchanging google token");
-      const account = await api.completeGoogleOAuth({
-        verifier_id: start.verifier_id,
-        authorization_code: code,
-        state
-      });
+      setAccountStatus("google authorization received");
       setSelectedId(account.id);
       setAccountProvider("gmail");
       await onAccountSaved(account);
