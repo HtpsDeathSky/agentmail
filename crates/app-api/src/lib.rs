@@ -1970,9 +1970,30 @@ struct GoogleOAuthCallback {
 }
 
 fn parse_google_oauth_callback_url(value: &str) -> ApiResult<GoogleOAuthCallback> {
-    let (_, query) = value
+    let (scheme, rest) = value.split_once("://").ok_or_else(|| {
+        ApiError::InvalidRequest("oauth callback url must use http://127.0.0.1".to_string())
+    })?;
+    if scheme != "http" {
+        return Err(ApiError::InvalidRequest(
+            "oauth callback url must use http://127.0.0.1".to_string(),
+        ));
+    }
+    let (authority, path_and_query) = rest
+        .split_once('/')
+        .ok_or_else(|| ApiError::InvalidRequest("oauth callback path is missing".to_string()))?;
+    if authority != "127.0.0.1:53682" {
+        return Err(ApiError::InvalidRequest(
+            "oauth callback url must target 127.0.0.1:53682".to_string(),
+        ));
+    }
+    let (path, query) = path_and_query
         .split_once('?')
         .ok_or_else(|| ApiError::InvalidRequest("oauth callback query is missing".to_string()))?;
+    if path != "oauth/google/callback" {
+        return Err(ApiError::InvalidRequest(
+            "oauth callback path must be /oauth/google/callback".to_string(),
+        ));
+    }
     let mut code = None;
     let mut state = None;
     let mut error = None;
@@ -2299,6 +2320,18 @@ mod tests {
         assert_eq!(callback.code, "auth-code");
         assert_eq!(callback.state, "state-value");
         assert_eq!(callback.error, None);
+    }
+
+    #[test]
+    fn rejects_non_loopback_google_oauth_callback_url() {
+        let error = parse_google_oauth_callback_url(
+            "https://example.com/oauth/google/callback?code=auth-code&state=state-value",
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, ApiError::InvalidRequest(message) if message.contains("127.0.0.1"))
+        );
     }
 
     #[tokio::test]
