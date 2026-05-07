@@ -33,11 +33,61 @@ pub fn timestamp_is_future(timestamp: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MailProvider {
+    #[default]
+    GenericImapSmtp,
+    Gmail,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MailAuth {
+    Password {
+        password: String,
+    },
+    GoogleOAuth {
+        refresh_token: String,
+        access_token: String,
+        expires_at: Timestamp,
+    },
+}
+
+impl std::fmt::Debug for MailAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Password { .. } => f
+                .debug_struct("Password")
+                .field("password", &"***")
+                .finish(),
+            Self::GoogleOAuth { expires_at, .. } => f
+                .debug_struct("GoogleOAuth")
+                .field("refresh_token", &"***")
+                .field("access_token", &"***")
+                .field("expires_at", expires_at)
+                .finish(),
+        }
+    }
+}
+
+impl Default for MailAuth {
+    fn default() -> Self {
+        Self::Password {
+            password: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MailAccount {
     pub id: String,
     pub display_name: String,
     pub email: String,
+    #[serde(default)]
+    pub provider: MailProvider,
+    #[serde(default)]
+    pub auth: MailAuth,
     pub imap_host: String,
     pub imap_port: u16,
     pub imap_tls: bool,
@@ -47,6 +97,16 @@ pub struct MailAccount {
     pub sync_enabled: bool,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
+}
+
+impl MailAccount {
+    pub fn is_password_auth(&self) -> bool {
+        matches!(self.auth, MailAuth::Password { .. })
+    }
+
+    pub fn is_oauth_auth(&self) -> bool {
+        matches!(self.auth, MailAuth::GoogleOAuth { .. })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -263,6 +323,22 @@ pub struct SendMessageResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ConnectionAuth {
+    Password { password: String },
+    GoogleOAuth { access_token: String },
+}
+
+impl ConnectionAuth {
+    pub fn is_present(&self) -> bool {
+        match self {
+            Self::Password { password } => !password.is_empty(),
+            Self::GoogleOAuth { access_token } => !access_token.is_empty(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConnectionSettings {
     pub account_id: Option<String>,
     pub email: String,
@@ -272,7 +348,7 @@ pub struct ConnectionSettings {
     pub smtp_host: String,
     pub smtp_port: u16,
     pub smtp_tls: bool,
-    pub password: String,
+    pub auth: ConnectionAuth,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -374,6 +450,109 @@ impl std::fmt::Debug for SaveAiSettingsRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_mail_account_defaults_to_generic_password_auth() {
+        let account: MailAccount = serde_json::from_value(serde_json::json!({
+            "id": "account-1",
+            "display_name": "Legacy Mail",
+            "email": "user@example.com",
+            "imap_host": "imap.example.com",
+            "imap_port": 993,
+            "imap_tls": true,
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 465,
+            "smtp_tls": true,
+            "sync_enabled": true,
+            "created_at": "2026-05-06T00:00:00Z",
+            "updated_at": "2026-05-06T00:00:00Z"
+        }))
+        .unwrap();
+
+        assert_eq!(account.provider, MailProvider::GenericImapSmtp);
+        assert_eq!(
+            account.auth,
+            MailAuth::Password {
+                password: String::new()
+            }
+        );
+        assert!(account.is_password_auth());
+        assert!(!account.is_oauth_auth());
+
+        let serialized = serde_json::to_value(&account).unwrap();
+
+        assert_eq!(
+            serialized.get("provider").and_then(|value| value.as_str()),
+            Some("generic_imap_smtp")
+        );
+        assert_eq!(
+            serialized
+                .get("auth")
+                .and_then(|auth| auth.get("type"))
+                .and_then(|value| value.as_str()),
+            Some("password")
+        );
+        assert_eq!(
+            serialized
+                .get("auth")
+                .and_then(|auth| auth.get("password"))
+                .and_then(|value| value.as_str()),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn mail_auth_debug_redacts_secrets() {
+        let password = MailAuth::Password {
+            password: "plain-password".to_string(),
+        };
+        let oauth = MailAuth::GoogleOAuth {
+            refresh_token: "refresh-secret".to_string(),
+            access_token: "access-secret".to_string(),
+            expires_at: "2026-05-06T01:00:00Z".to_string(),
+        };
+
+        let password_debug = format!("{password:?}");
+        let oauth_debug = format!("{oauth:?}");
+
+        assert!(!password_debug.contains("plain-password"));
+        assert!(password_debug.contains("***"));
+        assert!(!oauth_debug.contains("refresh-secret"));
+        assert!(!oauth_debug.contains("access-secret"));
+        assert!(oauth_debug.contains("***"));
+        assert!(oauth_debug.contains("2026-05-06T01:00:00Z"));
+    }
+
+    #[test]
+    fn gmail_oauth_account_round_trips_through_json() {
+        let account = MailAccount {
+            id: "account-2".to_string(),
+            display_name: "Gmail".to_string(),
+            email: "user@gmail.com".to_string(),
+            provider: MailProvider::Gmail,
+            auth: MailAuth::GoogleOAuth {
+                refresh_token: "refresh-token".to_string(),
+                access_token: "access-token".to_string(),
+                expires_at: "2026-05-06T01:00:00Z".to_string(),
+            },
+            imap_host: "imap.gmail.com".to_string(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.gmail.com".to_string(),
+            smtp_port: 465,
+            smtp_tls: true,
+            sync_enabled: true,
+            created_at: "2026-05-06T00:00:00Z".to_string(),
+            updated_at: "2026-05-06T00:00:00Z".to_string(),
+        };
+
+        let serialized = serde_json::to_string(&account).unwrap();
+        let deserialized: MailAccount = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(deserialized, account);
+        assert!(deserialized.is_oauth_auth());
+        assert!(!deserialized.is_password_auth());
+    }
 
     #[test]
     fn save_ai_settings_request_debug_redacts_api_key() {

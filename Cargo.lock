@@ -79,12 +79,15 @@ version = "0.1.0"
 dependencies = [
  "ai-remote",
  "async-trait",
+ "base64 0.22.1",
  "mail-core",
  "mail-protocol",
  "mail-store",
  "parking_lot",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "uuid",
@@ -2303,6 +2306,7 @@ name = "mail-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "time",
  "uuid",
 ]

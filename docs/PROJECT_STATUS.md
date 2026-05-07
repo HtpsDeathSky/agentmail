@@ -1,11 +1,12 @@
 # Project Status
 
-Last updated: 2026-04-29
+Last updated: 2026-05-06
 
 ## Current Source of Truth
 
 - Repository: `HtpsDeathSky/agentmail`
-- Branch: `main`
+- Branch: `feature/gmail-compatibility`
+- Gmail compatibility development is active on this branch. Do not assume these Gmail notes are on `main` until the branch is merged.
 - Direct-actions cleanup and consistency-first automatic sync are implemented on `main`; this status includes direct-send result hardening, browser-demo parity fixes, and the 2026-04-29 shift away from active QQ IDLE watcher sync.
 - Current working tree: run `git status --short` in the active checkout before starting new work.
 - Local working tree note: `.codex` may appear as an untracked local directory; do not treat it as project state and do not commit it.
@@ -18,7 +19,7 @@ AgentMail is a Windows-only desktop AI mail client MVP inspired by Foxmail. It f
 
 The user flow is:
 
-1. Add an IMAP/SMTP mailbox manually.
+1. Add an IMAP/SMTP mailbox manually, or add Gmail through Google sign-in for internal testing.
 2. Sync selectable folders and messages into local SQLite.
 3. Read, search, and manage messages in the desktop app.
 4. Compose mail; sending executes directly through SMTP and records an audit entry.
@@ -29,8 +30,11 @@ The user flow is:
 
 - Windows desktop shell with Tauri v2, Rust workspace, React/Vite UI, and SQLite.
 - Unified configuration UI for editable IMAP/SMTP account setup with connection testing.
+- Gmail provider mode in configuration with Google sign-in, Gmail IMAP/SMTP defaults, and browser-demo command coverage.
 - SQLite-backed accounts, folders, messages, sync state, FTS5 search, action audits, AI settings, and AI insights.
 - IMAP/SMTP account passwords are stored plaintext in SQLite for this MVP.
+- Gmail OAuth refresh/access tokens are stored in SQLite for this MVP.
+- Gmail sync/send uses the same IMAP/SMTP engine with XOAUTH2 after Google OAuth.
 - Live IMAP folder discovery and per-folder UID-based message sync.
 - Automatic refresh is consistency-sync driven for all enabled accounts; startup, foreground resume, a 120-second running-app interval, account save, and manual sync all use account-level sync.
 - IMAP IDLE watcher code remains isolated for future providers, but it is not part of the active sync path in this stage.
@@ -54,7 +58,8 @@ The user flow is:
 - MVP does not automatically analyze incoming mail.
 - AI API keys are stored plaintext in SQLite by product decision.
 - Mailbox passwords are stored plaintext in SQLite. Windows Credential Manager is no longer used.
-- OAuth is not implemented; use provider app passwords where required.
+- Gmail OAuth is implemented for internal testing, using `AGENTMAIL_GOOGLE_OAUTH_CLIENT_ID`; public distribution still needs Google OAuth consent setup and app verification.
+- The current desktop OAuth callback UX still needs a polished loopback completion flow; the UI can start Google sign-in and complete the token exchange, but the callback handling should be hardened before public release.
 - Attachment files are not downloaded yet.
 - Permanent delete is limited to messages already in Trash and should be tested only with disposable mail.
 - Move/archive backend support exists, but not all controls are exposed in the current UI.
@@ -62,16 +67,13 @@ The user flow is:
 
 ## Recent Verification
 
-For the consistency-sync architecture work, the following checks should be run on 2026-04-29:
+For Gmail compatibility work, the following checks passed on 2026-05-06:
 
 - `cargo fmt --all --check`
 - `git diff --check`
-- `cargo clippy -p mail-core -p mail-store -p mail-protocol -p ai-remote -p app-api --all-targets -- -D warnings`
 - `cargo test -p mail-core -p mail-store -p mail-protocol -p ai-remote -p app-api`
 - `pnpm test`
 - `pnpm build`
-- `pnpm rust:check`
-- `rg -n "startAccountWatchers|watcher start failed|WATCH_DIAGNOSTIC_EVENT" ui/src` should return no matches.
 
 Environment caveat:
 

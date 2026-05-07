@@ -5,12 +5,13 @@ use async_imap::extensions::idle::IdleResponse;
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use lettre::message::Mailbox;
-use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use mail_core::{
-    new_id, now_rfc3339, rfc3339_from_unix_timestamp, AttachmentRef, ConnectionSettings,
-    ConnectionTestResult, FolderRole, FolderWatchOutcome, MailAccount, MailActionKind, MailFolder,
-    MailMessage, MessageFetchRequest, MessageFlags, RemoteMailAction, SendMessageDraft,
+    new_id, now_rfc3339, rfc3339_from_unix_timestamp, AttachmentRef, ConnectionAuth,
+    ConnectionSettings, ConnectionTestResult, FolderRole, FolderWatchOutcome, MailAccount,
+    MailActionKind, MailFolder, MailMessage, MessageFetchRequest, MessageFlags, RemoteMailAction,
+    SendMessageDraft,
 };
 use mail_parser::{Address, HeaderName, HeaderValue, MessageParser, MimeHeaders};
 use thiserror::Error;
@@ -424,13 +425,13 @@ impl MailProtocol for MockMailProtocol {
         &self,
         settings: &ConnectionSettings,
     ) -> ProtocolResult<ConnectionTestResult> {
+        let auth_present = settings.auth.is_present();
         let imap_ok = !settings.email.trim().is_empty()
             && !settings.imap_host.trim().is_empty()
             && settings.imap_port > 0
-            && !settings.password.is_empty();
-        let smtp_ok = !settings.smtp_host.trim().is_empty()
-            && settings.smtp_port > 0
-            && !settings.password.is_empty();
+            && auth_present;
+        let smtp_ok =
+            !settings.smtp_host.trim().is_empty() && settings.smtp_port > 0 && auth_present;
 
         Ok(ConnectionTestResult {
             imap_ok,
@@ -438,7 +439,7 @@ impl MailProtocol for MockMailProtocol {
             message: if imap_ok && smtp_ok {
                 "mock protocol accepted account settings".to_string()
             } else {
-                "missing host, port, email, or password".to_string()
+                "missing host, port, email, or credentials".to_string()
             },
         })
     }
@@ -643,10 +644,26 @@ async fn login_imap(
         .map_err(|err| ProtocolError::Connection(sanitize_error(&err.to_string())))?
         .ok_or_else(|| ProtocolError::Connection("server closed before greeting".to_string()))?;
 
-    client
-        .login(&settings.email, &settings.password)
-        .await
-        .map_err(|(err, _client)| ProtocolError::Authentication(sanitize_error(&err.to_string())))
+    match &settings.auth {
+        ConnectionAuth::Password { password } => client
+            .login(&settings.email, password)
+            .await
+            .map_err(|(err, _client)| {
+                ProtocolError::Authentication(sanitize_error(&err.to_string()))
+            }),
+        ConnectionAuth::GoogleOAuth { access_token } => {
+            let auth = Xoauth2Authenticator {
+                email: &settings.email,
+                access_token,
+            };
+            client
+                .authenticate("XOAUTH2", auth)
+                .await
+                .map_err(|(err, _client)| {
+                    ProtocolError::Authentication(sanitize_error(&err.to_string()))
+                })
+        }
+    }
 }
 
 async fn drain_uid_store(
@@ -668,7 +685,16 @@ async fn drain_uid_store(
 fn build_smtp_transport(
     settings: &ConnectionSettings,
 ) -> ProtocolResult<AsyncSmtpTransport<Tokio1Executor>> {
-    let credentials = Credentials::new(settings.email.clone(), settings.password.clone());
+    let (credentials, mechanisms) = match &settings.auth {
+        ConnectionAuth::Password { password } => (
+            Credentials::new(settings.email.clone(), password.clone()),
+            vec![Mechanism::Plain, Mechanism::Login],
+        ),
+        ConnectionAuth::GoogleOAuth { access_token } => (
+            Credentials::new(settings.email.clone(), access_token.clone()),
+            vec![Mechanism::Xoauth2],
+        ),
+    };
     let builder = if settings.smtp_tls && settings.smtp_port == 587 {
         AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&settings.smtp_host)
             .map_err(|err| ProtocolError::Connection(err.to_string()))?
@@ -682,7 +708,25 @@ fn build_smtp_transport(
     Ok(builder
         .port(settings.smtp_port)
         .credentials(credentials)
+        .authentication(mechanisms)
         .build())
+}
+
+struct Xoauth2Authenticator<'a> {
+    email: &'a str,
+    access_token: &'a str,
+}
+
+impl async_imap::Authenticator for Xoauth2Authenticator<'_> {
+    type Response = String;
+
+    fn process(&mut self, _challenge: &[u8]) -> Self::Response {
+        build_xoauth2_payload(self.email, self.access_token)
+    }
+}
+
+fn build_xoauth2_payload(email: &str, access_token: &str) -> String {
+    format!("user={email}\x01auth=Bearer {access_token}\x01\x01")
 }
 
 fn parse_mailbox(value: &str) -> ProtocolResult<Mailbox> {
@@ -988,6 +1032,17 @@ fn sanitize_error(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mail_core::{MailAuth, MailProvider};
+
+    #[test]
+    fn builds_xoauth2_sasl_payload() {
+        let payload = build_xoauth2_payload("user@gmail.com", "access-token");
+
+        assert_eq!(
+            payload,
+            "user=user@gmail.com\x01auth=Bearer access-token\x01\x01"
+        );
+    }
 
     #[test]
     fn parses_plain_text_message_with_attachment_metadata() {
@@ -995,6 +1050,10 @@ mod tests {
             id: "acct".to_string(),
             display_name: "Ops".to_string(),
             email: "ops@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: String::new(),
+            },
             imap_host: "imap.example.com".to_string(),
             imap_port: 993,
             imap_tls: true,
@@ -1058,6 +1117,10 @@ mod tests {
             id: "acct".to_string(),
             display_name: "Ops".to_string(),
             email: "ops@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: String::new(),
+            },
             imap_host: "imap.example.com".to_string(),
             imap_port: 993,
             imap_tls: true,

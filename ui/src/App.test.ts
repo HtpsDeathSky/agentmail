@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   clampWorkspaceSplitPercent,
+  canStartGoogleSignIn,
+  getAccountProviderFormMode,
   getAppShellClassName,
-  getWorkspaceSplitModel
+  inferAccountProvider,
+  getWorkspaceSplitModel,
+  runGoogleSignInFlow
 } from "./App";
 import {
   refreshAfterMailSyncEvent,
@@ -56,6 +60,111 @@ describe("getManualSyncButtonState", () => {
       disabled: true,
       title: "Sync running"
     });
+  });
+});
+
+describe("getAccountProviderFormMode", () => {
+  it("uses google sign-in controls for Gmail accounts", () => {
+    expect(getAccountProviderFormMode("gmail")).toEqual({
+      showPasswordField: false,
+      showGoogleSignIn: true,
+      testConnectionEnabled: false
+    });
+  });
+});
+
+describe("inferAccountProvider", () => {
+  it("keeps legacy gmail-address accounts on generic IMAP/SMTP unless provider is Gmail", () => {
+    expect(
+      inferAccountProvider({
+        id: "legacy-gmail",
+        display_name: "Legacy Gmail",
+        email: "legacy@gmail.com",
+        provider: "generic_imap_smtp",
+        imap_host: "imap.gmail.com",
+        imap_port: 993,
+        imap_tls: true,
+        smtp_host: "smtp.gmail.com",
+        smtp_port: 465,
+        smtp_tls: true,
+        sync_enabled: true,
+        created_at: "2026-05-07T00:00:00.000Z",
+        updated_at: "2026-05-07T00:00:00.000Z"
+      })
+    ).toBe("generic_imap_smtp");
+  });
+
+  it("uses Gmail OAuth controls only for persisted Gmail provider accounts", () => {
+    expect(
+      inferAccountProvider({
+        id: "gmail-oauth",
+        display_name: "Gmail OAuth",
+        email: "user@gmail.com",
+        provider: "gmail",
+        imap_host: "imap.gmail.com",
+        imap_port: 993,
+        imap_tls: true,
+        smtp_host: "smtp.gmail.com",
+        smtp_port: 465,
+        smtp_tls: true,
+        sync_enabled: true,
+        created_at: "2026-05-07T00:00:00.000Z",
+        updated_at: "2026-05-07T00:00:00.000Z"
+      })
+    ).toBe("gmail");
+  });
+});
+
+describe("canStartGoogleSignIn", () => {
+  it("allows Google sign-in only while creating a new account", () => {
+    expect(canStartGoogleSignIn(null)).toBe(true);
+    expect(canStartGoogleSignIn(undefined)).toBe(true);
+    expect(canStartGoogleSignIn("existing-account")).toBe(false);
+  });
+});
+
+describe("runGoogleSignInFlow", () => {
+  it("opens the authorization URL and waits for the backend callback without prompting", async () => {
+    const account = {
+      id: "acct-gmail",
+      display_name: "Ops Gmail",
+      email: "ops@gmail.com",
+      provider: "gmail" as const,
+      imap_host: "imap.gmail.com",
+      imap_port: 993,
+      imap_tls: true,
+      smtp_host: "smtp.gmail.com",
+      smtp_port: 465,
+      smtp_tls: true,
+      sync_enabled: true,
+      created_at: "2026-05-06T00:00:00.000Z",
+      updated_at: "2026-05-06T00:00:00.000Z"
+    };
+    const startGoogleOAuth = vi.fn().mockResolvedValue({
+      authorization_url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=test",
+      verifier_id: "verifier-1",
+      redirect_uri: "http://127.0.0.1:45678/oauth/google/callback"
+    });
+    const waitForGoogleOAuthCallback = vi.fn().mockResolvedValue(account);
+    const openAuthorizationUrl = vi.fn();
+    const prompt = vi.spyOn(window, "prompt");
+
+    const result = await runGoogleSignInFlow({
+      email: "ops@gmail.com",
+      displayName: "",
+      startGoogleOAuth,
+      waitForGoogleOAuthCallback,
+      openAuthorizationUrl
+    });
+
+    expect(result).toBe(account);
+    expect(startGoogleOAuth).toHaveBeenCalledWith({
+      email: "ops@gmail.com",
+      display_name: "Gmail"
+    });
+    expect(openAuthorizationUrl).toHaveBeenCalledWith("https://accounts.google.com/o/oauth2/v2/auth?client_id=test");
+    expect(waitForGoogleOAuthCallback).toHaveBeenCalledWith({ verifier_id: "verifier-1" });
+    expect(prompt).not.toHaveBeenCalled();
   });
 });
 

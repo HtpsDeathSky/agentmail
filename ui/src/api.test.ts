@@ -74,6 +74,62 @@ describe("api demo AI bindings", () => {
     await expect(api.runForegroundSync(null)).resolves.toBeNull();
   });
 
+  it("starts and completes Gmail OAuth in the browser demo", async () => {
+    const start = await api.startGoogleOAuth({
+      email: "demo@gmail.com",
+      display_name: "Demo Gmail"
+    });
+
+    expect(start.authorization_url).toContain("accounts.google.com");
+    expect(start.redirect_uri).toContain("/oauth/google/callback");
+    const state = new URL(start.authorization_url).searchParams.get("state");
+    expect(state).toBeTruthy();
+
+    const account = await api.completeGoogleOAuth({
+      verifier_id: start.verifier_id,
+      authorization_code: "demo-code",
+      state: state ?? ""
+    });
+
+    expect(account.provider).toBe("gmail");
+    expect(account.imap_host).toBe("imap.gmail.com");
+    expect(account.smtp_host).toBe("smtp.gmail.com");
+  });
+
+  it("rejects Gmail OAuth completion with the wrong demo state", async () => {
+    const start = await api.startGoogleOAuth({
+      email: "demo-state@gmail.com",
+      display_name: "Demo State"
+    });
+
+    await expect(
+      api.completeGoogleOAuth({
+        verifier_id: start.verifier_id,
+        authorization_code: "demo-code",
+        state: "wrong-state"
+      })
+    ).rejects.toThrow(/state/i);
+  });
+
+  it("waits for Gmail OAuth callback in the browser demo", async () => {
+    const start = await api.startGoogleOAuth({
+      email: "demo-wait@gmail.com",
+      display_name: "Demo Wait Gmail"
+    });
+
+    const account = await api.waitForGoogleOAuthCallback({
+      verifier_id: start.verifier_id
+    });
+
+    expect(account.provider).toBe("gmail");
+    expect(account.email).toBe("demo-wait@gmail.com");
+    await expect(
+      api.waitForGoogleOAuthCallback({
+        verifier_id: start.verifier_id
+      })
+    ).rejects.toThrow(/session/i);
+  });
+
   it("sends directly in the browser demo and records Sent mail", async () => {
     const account = await api.saveAccountConfig({
       id: null,

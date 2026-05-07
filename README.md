@@ -5,11 +5,14 @@ Windows-first desktop mail client MVP built with Tauri v2, Rust, React/Vite, and
 ## Current MVP
 
 - Unified configuration for editable IMAP/SMTP account setup with real connection tests.
+- Gmail internal-test support through Google OAuth plus IMAP/SMTP XOAUTH2.
 - SQLite-backed accounts, folders, messages, sync state, FTS5 search, and action audit log.
 - IMAP/SMTP account passwords are stored plaintext in SQLite for this MVP.
+- Gmail OAuth refresh/access tokens are stored in SQLite for this MVP.
 - Replaceable mail protocol boundary. The desktop backend uses `LiveMailProtocol`; tests and browser demo fallback use `MockMailProtocol`.
 - All selectable IMAP folders sync through UID search/fetch with per-folder sync state, MIME parsing,正文文本存储, and attachment metadata indexing without downloading attachment files.
 - SMTP send through `lettre`; port `465` uses implicit TLS and port `587` uses STARTTLS.
+- Gmail uses `imap.gmail.com:993` and `smtp.gmail.com:465` with XOAUTH2 after Google sign-in.
 - Account-level sync locking plus per-folder failure counts and short exponential backoff after sync failures.
 - Mail actions and SMTP sends execute directly from the UI; action history is recorded in the audit log.
 - Tauri startup triggers background sync for accounts with `sync_enabled=true`.
@@ -48,6 +51,8 @@ cargo fmt --all --check
 ```
 
 For real mailbox validation, use the checklist in [docs/REAL_MAIL_ACCEPTANCE.md](docs/REAL_MAIL_ACCEPTANCE.md).
+
+For Gmail internal testing, set `AGENTMAIL_GOOGLE_OAUTH_CLIENT_ID` before launching the desktop app. Public Gmail distribution still requires Google OAuth consent configuration and app verification.
 
 For desktop development:
 

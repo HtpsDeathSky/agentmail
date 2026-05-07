@@ -7,7 +7,9 @@ mod sync_service;
 use std::sync::Arc;
 
 use app_api::{
-    AccountConfigView, AddAccountRequest, AppApi, SaveAccountConfigRequest, SyncSummary,
+    AccountConfigView, AddAccountRequest, AppApi, GmailOAuthCompleteRequest,
+    GmailOAuthLoopbackCompleteRequest, GmailOAuthRefreshRequest, GmailOAuthStartRequest,
+    GmailOAuthStartResult, GmailOAuthWaitForCallbackRequest, SaveAccountConfigRequest, SyncSummary,
     TestConnectionRequest,
 };
 use idle_watchers::{start_account_watchers_for_api, WatcherRegistry};
@@ -64,6 +66,62 @@ async fn save_account_config(
     state
         .api
         .save_account_config(request)
+        .await
+        .map_err(to_error)
+}
+
+#[tauri::command]
+fn start_google_oauth(
+    state: State<'_, ApiState>,
+    request: GmailOAuthStartRequest,
+) -> Result<GmailOAuthStartResult, String> {
+    state.api.start_google_oauth(request).map_err(to_error)
+}
+
+#[tauri::command]
+async fn complete_google_oauth(
+    state: State<'_, ApiState>,
+    request: GmailOAuthCompleteRequest,
+) -> Result<MailAccount, String> {
+    state
+        .api
+        .complete_google_oauth(request)
+        .await
+        .map_err(to_error)
+}
+
+#[tauri::command]
+async fn complete_google_oauth_from_loopback(
+    state: State<'_, ApiState>,
+    request: GmailOAuthLoopbackCompleteRequest,
+) -> Result<MailAccount, String> {
+    state
+        .api
+        .complete_google_oauth_from_loopback(request)
+        .await
+        .map_err(to_error)
+}
+
+#[tauri::command]
+async fn wait_for_google_oauth_callback(
+    state: State<'_, ApiState>,
+    request: GmailOAuthWaitForCallbackRequest,
+) -> Result<MailAccount, String> {
+    state
+        .api
+        .wait_for_google_oauth_callback(request)
+        .await
+        .map_err(to_error)
+}
+
+#[tauri::command]
+async fn refresh_google_oauth(
+    state: State<'_, ApiState>,
+    request: GmailOAuthRefreshRequest,
+) -> Result<MailAccount, String> {
+    state
+        .api
+        .refresh_google_oauth(request)
         .await
         .map_err(to_error)
 }
@@ -265,6 +323,11 @@ fn main() {
             list_accounts,
             get_account_config,
             save_account_config,
+            start_google_oauth,
+            complete_google_oauth,
+            complete_google_oauth_from_loopback,
+            wait_for_google_oauth_callback,
+            refresh_google_oauth,
             sync_account,
             run_foreground_sync,
             start_account_watchers,
