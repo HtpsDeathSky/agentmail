@@ -46,7 +46,7 @@ describe("api demo AI bindings", () => {
     expect(JSON.stringify(settings)).not.toContain("abcdefg");
   });
 
-  it("returns concise Chinese demo AI summaries", async () => {
+  it("returns Chinese demo AI summaries that describe the actual message content", async () => {
     await api.saveAiSettings({
       provider_name: "openai-compatible",
       base_url: "https://api.example.com/v1",
@@ -64,7 +64,9 @@ describe("api demo AI bindings", () => {
     const insight = await api.runAiAnalysis(messages[0].id);
 
     expect(insight.summary).toMatch(/[\u4e00-\u9fff]/);
-    expect(insight.summary.length).toBeLessThanOrEqual(80);
+    expect(insight.summary).toContain("凭证轮换");
+    expect(insight.summary).toContain("18:00");
+    expect(insight.summary).not.toMatch(/邮件内容已整理|这是一封|邮件类型/);
     expect(insight.todos.every((todo) => /[\u4e00-\u9fff]/.test(todo))).toBe(true);
     expect(insight.reply_draft === "" || /[\u4e00-\u9fff]/.test(insight.reply_draft)).toBe(true);
   });

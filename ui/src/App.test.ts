@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   clampWorkspaceSplitPercent,
   canStartGoogleSignIn,
+  formatGoogleSignInError,
   getAccountProviderFormMode,
   getAppShellClassName,
   inferAccountProvider,
@@ -165,6 +166,18 @@ describe("runGoogleSignInFlow", () => {
     expect(openAuthorizationUrl).toHaveBeenCalledWith("https://accounts.google.com/o/oauth2/v2/auth?client_id=test");
     expect(waitForGoogleOAuthCallback).toHaveBeenCalledWith({ verifier_id: "verifier-1" });
     expect(prompt).not.toHaveBeenCalled();
+  });
+});
+
+describe("formatGoogleSignInError", () => {
+  it("explains when Google sign-in has not been configured for this desktop app", () => {
+    expect(
+      formatGoogleSignInError(
+        new Error("invalid request: AGENTMAIL_GOOGLE_OAUTH_CLIENT_ID is required")
+      )
+    ).toBe(
+      "google sign in is not configured: set AGENTMAIL_GOOGLE_OAUTH_CLIENT_ID before launching AgentMail"
+    );
   });
 });
 

@@ -252,6 +252,22 @@ const validateAiBaseUrl = (baseUrl: string) => {
   if (parsed.protocol !== "https:") throw new Error("base_url must use https");
 };
 
+const buildDemoAiSummary = (message: MailMessage) => {
+  const content = `${message.subject} ${message.body_preview} ${message.body ?? ""}`.toLowerCase();
+  if (content.includes("credential rotation")) {
+    return "邮件说明凭证轮换窗口今晚开启，需要在18:00前确认服务负责人和停机例外事项。";
+  }
+  if (content.includes("invoice") || content.includes("reconciliation")) {
+    return "邮件说明有三张供应商发票等待核对，当前只索引了附件元数据，附件文件尚未下载。";
+  }
+  if (content.includes("build 42") || content.includes("smoke tests")) {
+    return "邮件说明 Build 42 已通过冒烟测试，同时当前 MVP 仍保持邮件客户端遥测关闭。";
+  }
+  const source = (message.body ?? message.body_preview).replace(/\s+/g, " ").trim();
+  const excerpt = source.length > 96 ? `${source.slice(0, 96)}...` : source;
+  return excerpt ? `邮件核心内容：${excerpt}` : "邮件没有可提取的正文内容。";
+};
+
 const isSentFolderPath = (path: string) => {
   const parts = path.toLowerCase().split(/[/.]/);
   const name = parts[parts.length - 1] ?? "";
@@ -583,16 +599,12 @@ export const demoBackend = {
 
         const hasAction = /\b(action|required|confirm|waiting|before|tonight)\b/i.test(`${message.subject} ${message.body_preview}`);
         const priority: AiPriority = hasAction ? "high" : "normal";
-        const summary = hasAction
-          ? "需要在截止时间前确认相关负责人和例外事项。"
-          : message.attachments.length > 0
-            ? "邮件包含待核对附件，请按需查看处理。"
-            : "邮件内容已整理，可按需阅读归档。";
+        const summary = buildDemoAiSummary(message);
         const payload = {
           summary,
           category: message.attachments.length > 0 ? "财务" : hasAction ? "运维" : "一般",
           priority,
-          todos: hasAction ? ["确认邮件要求的事项并及时回复。"] : [],
+          todos: hasAction ? ["在18:00前确认服务负责人和停机例外事项。"] : [],
           reply_draft: hasAction ? "已收到，我会在截止时间前确认并回复。" : ""
         };
         const insight: AiInsight = {

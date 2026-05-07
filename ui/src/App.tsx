@@ -128,6 +128,14 @@ export async function runGoogleSignInFlow({
   return waitForGoogleOAuthCallback({ verifier_id: start.verifier_id });
 }
 
+export function formatGoogleSignInError(error: unknown) {
+  const message = String(error);
+  if (message.includes("AGENTMAIL_GOOGLE_OAUTH_CLIENT_ID")) {
+    return "google sign in is not configured: set AGENTMAIL_GOOGLE_OAUTH_CLIENT_ID before launching AgentMail";
+  }
+  return `google sign in failed: ${message}`;
+}
+
 export const MAIL_SYNC_EVENT = "agentmail-mail-sync";
 const WORKSPACE_LIST_MIN_WIDTH = 320;
 const WORKSPACE_DETAIL_MIN_WIDTH = 420;
@@ -1219,7 +1227,7 @@ function ConfigurationModal({
       await onAccountSaved(account);
       setAccountStatus(`google sign in complete: ${account.email}`);
     } catch (error) {
-      setAccountStatus(`google sign in failed: ${String(error)}`);
+      setAccountStatus(formatGoogleSignInError(error));
     } finally {
       setAccountBusy(false);
     }
@@ -1458,12 +1466,6 @@ function ConfigurationModal({
                 <PanelRight size={16} />
                 {showActivityLog ? "HIDE" : "SHOW"}
               </button>
-            </div>
-            <div className="theme-swatch-grid" aria-label="Theme color preview">
-              <span className="theme-swatch swatch-surface" />
-              <span className="theme-swatch swatch-panel" />
-              <span className="theme-swatch swatch-accent" />
-              <span className="theme-swatch swatch-danger" />
             </div>
           </section>
         )}

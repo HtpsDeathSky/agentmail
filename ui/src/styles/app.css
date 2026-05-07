@@ -182,11 +182,13 @@ body {
 
 button,
 input,
-textarea {
+textarea,
+select {
   font: inherit;
 }
 
-button {
+button,
+select {
   color: inherit;
 }
 
@@ -276,7 +278,8 @@ button {
 
 .search-strip input,
 .modal-panel input,
-.modal-panel textarea {
+.modal-panel textarea,
+.modal-panel select {
   width: 100%;
   min-width: 0;
   border: 0;
@@ -1071,12 +1074,23 @@ button {
 }
 
 .modal-panel input,
-.modal-panel textarea {
+.modal-panel textarea,
+.modal-panel select {
   min-height: 36px;
   padding: 8px 10px;
   border: 1px solid var(--color-border-modal);
   border-radius: 4px;
   background: var(--color-input-bg);
+}
+
+.modal-panel select {
+  background-color: var(--color-input-bg);
+  color: var(--color-text-input);
+}
+
+.modal-panel select option {
+  background: var(--color-input-bg);
+  color: var(--color-text-input);
 }
 
 .modal-panel textarea {
@@ -1300,34 +1314,6 @@ button {
 
 .theme-switch-row button svg {
   color: var(--color-accent);
-}
-
-.theme-swatch-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.theme-swatch {
-  min-height: 34px;
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-}
-
-.swatch-surface {
-  background: var(--color-app-bg);
-}
-
-.swatch-panel {
-  background: var(--color-surface);
-}
-
-.swatch-accent {
-  background: var(--color-accent);
-}
-
-.swatch-danger {
-  background: var(--color-danger);
 }
 
 .configuration-panel .checkbox-row {
