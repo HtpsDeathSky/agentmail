@@ -354,6 +354,30 @@ export const demoBackend = {
         recordAudit("mark_read", next.id, []);
         return next;
       }
+      case "wait_for_google_oauth_callback": {
+        const request = args?.request as { verifier_id: string };
+        const session = gmailOAuthSessions[request.verifier_id];
+        if (!session) throw new Error("oauth verifier session not found");
+        delete gmailOAuthSessions[request.verifier_id];
+        const next: MailAccount = {
+          id: crypto.randomUUID(),
+          display_name: session.display_name,
+          email: session.email,
+          provider: "gmail",
+          imap_host: "imap.gmail.com",
+          imap_port: 993,
+          imap_tls: true,
+          smtp_host: "smtp.gmail.com",
+          smtp_port: 465,
+          smtp_tls: true,
+          sync_enabled: true,
+          created_at: now(),
+          updated_at: now()
+        };
+        accounts = [next, ...accounts];
+        recordAudit("mark_read", next.id, []);
+        return next;
+      }
       case "refresh_google_oauth": {
         const request = args?.request as GmailOAuthRefreshRequest;
         const found = accounts.find((item) => item.id === request.account_id);

@@ -94,6 +94,25 @@ describe("api demo AI bindings", () => {
     expect(account.smtp_host).toBe("smtp.gmail.com");
   });
 
+  it("waits for Gmail OAuth callback in the browser demo", async () => {
+    const start = await api.startGoogleOAuth({
+      email: "demo-wait@gmail.com",
+      display_name: "Demo Wait Gmail"
+    });
+
+    const account = await api.waitForGoogleOAuthCallback({
+      verifier_id: start.verifier_id
+    });
+
+    expect(account.provider).toBe("gmail");
+    expect(account.email).toBe("demo-wait@gmail.com");
+    await expect(
+      api.waitForGoogleOAuthCallback({
+        verifier_id: start.verifier_id
+      })
+    ).rejects.toThrow(/session/i);
+  });
+
   it("sends directly in the browser demo and records Sent mail", async () => {
     const account = await api.saveAccountConfig({
       id: null,
