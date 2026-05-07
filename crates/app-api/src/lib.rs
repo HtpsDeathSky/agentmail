@@ -403,8 +403,12 @@ impl AppApi {
         &self,
         request: GmailOAuthRefreshRequest,
     ) -> ApiResult<MailAccount> {
-        let client_id = self.google_oauth_client_id()?;
         let mut account = self.store.get_account(&request.account_id)?;
+        if account.provider != MailProvider::Gmail {
+            return Err(ApiError::InvalidRequest(
+                "account does not use google oauth".to_string(),
+            ));
+        }
         let refresh_token = match &account.auth {
             MailAuth::GoogleOAuth { refresh_token, .. } if !refresh_token.is_empty() => {
                 refresh_token.clone()
@@ -420,9 +424,12 @@ impl AppApi {
                 ));
             }
         };
-        let token = refresh_google_oauth_token(&client_id, &refresh_token).await?;
+        let token = self
+            .refresh_google_oauth_token_for_refresh_token(&refresh_token)
+            .await?;
+        let next_refresh_token = token.refresh_token.unwrap_or(refresh_token);
         account.auth = MailAuth::GoogleOAuth {
-            refresh_token,
+            refresh_token: next_refresh_token,
             access_token: token.access_token,
             expires_at: now_plus_seconds_rfc3339(token.expires_in),
         };
@@ -1706,6 +1713,10 @@ impl AppApi {
         &self,
         account: &MailAccount,
     ) -> ApiResult<MailAccount> {
+        if account.provider != MailProvider::Gmail {
+            return Ok(account.clone());
+        }
+
         let MailAuth::GoogleOAuth {
             refresh_token,
             access_token,
@@ -1724,22 +1735,32 @@ impl AppApi {
             ));
         }
 
-        let token = if let Some(refresher) = &self.google_token_refresher {
-            refresher(refresh_token.clone())?
-        } else {
-            let client_id = self.google_oauth_client_id()?;
-            refresh_google_oauth_token(&client_id, refresh_token).await?
-        };
+        let token = self
+            .refresh_google_oauth_token_for_refresh_token(refresh_token)
+            .await?;
+        let next_refresh_token = token.refresh_token.unwrap_or_else(|| refresh_token.clone());
 
         let mut refreshed = account.clone();
         refreshed.auth = MailAuth::GoogleOAuth {
-            refresh_token: refresh_token.clone(),
+            refresh_token: next_refresh_token,
             access_token: token.access_token,
             expires_at: now_plus_seconds_rfc3339(token.expires_in),
         };
         refreshed.updated_at = now_rfc3339();
         self.store.save_account(&refreshed)?;
         Ok(refreshed)
+    }
+
+    async fn refresh_google_oauth_token_for_refresh_token(
+        &self,
+        refresh_token: &str,
+    ) -> ApiResult<GoogleOAuthTokenResponse> {
+        if let Some(refresher) = &self.google_token_refresher {
+            refresher(refresh_token.to_string())
+        } else {
+            let client_id = self.google_oauth_client_id()?;
+            refresh_google_oauth_token(&client_id, refresh_token).await
+        }
     }
 
     fn google_oauth_client_id(&self) -> ApiResult<String> {
@@ -2570,6 +2591,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expired_gmail_token_refresh_persists_rotated_refresh_token() {
+        let api = AppApi::new_with_google_oauth_client_id_for_tests(
+            MailStore::memory().unwrap(),
+            Arc::new(MockMailProtocol),
+            Some("test-client-id.apps.googleusercontent.com".to_string()),
+        )
+        .with_google_token_refresher_for_tests(Arc::new(|refresh_token| {
+            assert_eq!(refresh_token, "old-refresh-token");
+            Ok(GoogleOAuthTokenResponse {
+                access_token: "fresh-access-token".to_string(),
+                expires_in: 3600,
+                refresh_token: Some("rotated-refresh-token".to_string()),
+            })
+        }));
+
+        let account = MailAccount {
+            id: "gmail-rotated-token".to_string(),
+            display_name: "Gmail".to_string(),
+            email: "user@gmail.com".to_string(),
+            provider: MailProvider::Gmail,
+            auth: MailAuth::GoogleOAuth {
+                refresh_token: "old-refresh-token".to_string(),
+                access_token: "expired-access-token".to_string(),
+                expires_at: "2000-01-01T00:00:00Z".to_string(),
+            },
+            imap_host: "imap.gmail.com".to_string(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.gmail.com".to_string(),
+            smtp_port: 465,
+            smtp_tls: true,
+            sync_enabled: true,
+            created_at: "2026-05-07T00:00:00Z".to_string(),
+            updated_at: "2026-05-07T00:00:00Z".to_string(),
+        };
+        api.store.save_account(&account).unwrap();
+
+        api.connection_settings_for_account(&account).await.unwrap();
+
+        let loaded = api.store.get_account("gmail-rotated-token").unwrap();
+        assert!(matches!(
+            loaded.auth,
+            MailAuth::GoogleOAuth {
+                refresh_token,
+                access_token,
+                ..
+            } if refresh_token == "rotated-refresh-token" && access_token == "fresh-access-token"
+        ));
+    }
+
+    #[tokio::test]
     async fn fresh_gmail_token_reuses_existing_access_token() {
         let api = AppApi::new_with_google_oauth_client_id_for_tests(
             MailStore::memory().unwrap(),
@@ -2597,6 +2669,132 @@ mod tests {
                 access_token: "current-access-token".to_string(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn non_gmail_account_with_google_oauth_auth_does_not_refresh_token() {
+        let api = AppApi::new_with_google_oauth_client_id_for_tests(
+            MailStore::memory().unwrap(),
+            Arc::new(MockMailProtocol),
+            Some("test-client-id.apps.googleusercontent.com".to_string()),
+        )
+        .with_google_token_refresher_for_tests(Arc::new(|_| {
+            panic!("non-gmail account should not refresh google token");
+        }));
+
+        let account = MailAccount {
+            id: "generic-google-auth".to_string(),
+            display_name: "Generic OAuth".to_string(),
+            email: "user@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::GoogleOAuth {
+                refresh_token: "refresh-token".to_string(),
+                access_token: "expired-access-token".to_string(),
+                expires_at: "2000-01-01T00:00:00Z".to_string(),
+            },
+            imap_host: "imap.example.com".to_string(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_port: 465,
+            smtp_tls: true,
+            sync_enabled: true,
+            created_at: "2026-05-07T00:00:00Z".to_string(),
+            updated_at: "2026-05-07T00:00:00Z".to_string(),
+        };
+
+        let settings = api.connection_settings_for_account(&account).await.unwrap();
+
+        assert_eq!(
+            settings.auth,
+            ConnectionAuth::GoogleOAuth {
+                access_token: "expired-access-token".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_google_oauth_refresh_rejects_non_gmail_account() {
+        let api = AppApi::new_with_google_oauth_client_id_for_tests(
+            MailStore::memory().unwrap(),
+            Arc::new(MockMailProtocol),
+            None,
+        );
+        let account = MailAccount {
+            id: "generic-google-auth-refresh".to_string(),
+            display_name: "Generic OAuth".to_string(),
+            email: "user@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::GoogleOAuth {
+                refresh_token: "refresh-token".to_string(),
+                access_token: "expired-access-token".to_string(),
+                expires_at: "2000-01-01T00:00:00Z".to_string(),
+            },
+            imap_host: "imap.example.com".to_string(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_port: 465,
+            smtp_tls: true,
+            sync_enabled: true,
+            created_at: "2026-05-07T00:00:00Z".to_string(),
+            updated_at: "2026-05-07T00:00:00Z".to_string(),
+        };
+        api.store.save_account(&account).unwrap();
+
+        let error = api
+            .refresh_google_oauth(GmailOAuthRefreshRequest {
+                account_id: "generic-google-auth-refresh".to_string(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, ApiError::InvalidRequest(message) if message.contains("account does not use google oauth"))
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_google_oauth_refresh_persists_rotated_refresh_token() {
+        let api = AppApi::new_with_google_oauth_client_id_for_tests(
+            MailStore::memory().unwrap(),
+            Arc::new(MockMailProtocol),
+            Some("test-client-id.apps.googleusercontent.com".to_string()),
+        )
+        .with_google_token_refresher_for_tests(Arc::new(|refresh_token| {
+            assert_eq!(refresh_token, "old-refresh-token");
+            Ok(GoogleOAuthTokenResponse {
+                access_token: "fresh-access-token".to_string(),
+                expires_in: 3600,
+                refresh_token: Some("rotated-refresh-token".to_string()),
+            })
+        }));
+
+        let mut account = gmail_oauth_account(
+            "User".to_string(),
+            "user@gmail.com".to_string(),
+            "old-refresh-token".to_string(),
+            "expired-access-token".to_string(),
+            -3600,
+        );
+        account.id = "manual-gmail-refresh".to_string();
+        api.store.save_account(&account).unwrap();
+
+        let refreshed = api
+            .refresh_google_oauth(GmailOAuthRefreshRequest {
+                account_id: "manual-gmail-refresh".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            refreshed.auth,
+            MailAuth::GoogleOAuth {
+                refresh_token,
+                access_token,
+                ..
+            } if refresh_token == "rotated-refresh-token" && access_token == "fresh-access-token"
+        ));
     }
 
     #[tokio::test]
