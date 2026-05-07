@@ -82,16 +82,33 @@ describe("api demo AI bindings", () => {
 
     expect(start.authorization_url).toContain("accounts.google.com");
     expect(start.redirect_uri).toContain("/oauth/google/callback");
+    const state = new URL(start.authorization_url).searchParams.get("state");
+    expect(state).toBeTruthy();
 
     const account = await api.completeGoogleOAuth({
       verifier_id: start.verifier_id,
       authorization_code: "demo-code",
-      state: "demo-state"
+      state: state ?? ""
     });
 
     expect(account.provider).toBe("gmail");
     expect(account.imap_host).toBe("imap.gmail.com");
     expect(account.smtp_host).toBe("smtp.gmail.com");
+  });
+
+  it("rejects Gmail OAuth completion with the wrong demo state", async () => {
+    const start = await api.startGoogleOAuth({
+      email: "demo-state@gmail.com",
+      display_name: "Demo State"
+    });
+
+    await expect(
+      api.completeGoogleOAuth({
+        verifier_id: start.verifier_id,
+        authorization_code: "demo-code",
+        state: "wrong-state"
+      })
+    ).rejects.toThrow(/state/i);
   });
 
   it("waits for Gmail OAuth callback in the browser demo", async () => {

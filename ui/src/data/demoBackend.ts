@@ -200,7 +200,8 @@ let accounts = [account];
 let accountPasswords: Record<string, string> = {
   [account.id]: "demo-mail-secret"
 };
-let gmailOAuthSessions: Record<string, GmailOAuthStartRequest> = {};
+type DemoGmailOAuthSession = GmailOAuthStartRequest & { state: string };
+let gmailOAuthSessions: Record<string, DemoGmailOAuthSession> = {};
 let aiSettings: AiSettingsView | null = {
   provider_name: "openai-compatible",
   base_url: "https://api.example.com/v1",
@@ -320,11 +321,12 @@ export const demoBackend = {
       case "start_google_oauth": {
         const request = args?.request as GmailOAuthStartRequest;
         const verifierId = crypto.randomUUID();
-        gmailOAuthSessions[verifierId] = request;
+        const state = crypto.randomUUID();
+        gmailOAuthSessions[verifierId] = { ...request, state };
         const result: GmailOAuthStartResult = {
           authorization_url: `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&scope=https%3A%2F%2Fmail.google.com%2F&login_hint=${encodeURIComponent(
             request.email
-          )}&state=demo-state`,
+          )}&state=${encodeURIComponent(state)}`,
           verifier_id: verifierId,
           redirect_uri: "http://127.0.0.1:53682/oauth/google/callback"
         };
@@ -334,6 +336,10 @@ export const demoBackend = {
         const request = args?.request as GmailOAuthCompleteRequest;
         const session = gmailOAuthSessions[request.verifier_id];
         if (!session) throw new Error("oauth verifier session not found");
+        if (request.state !== session.state) {
+          delete gmailOAuthSessions[request.verifier_id];
+          throw new Error("oauth state mismatch");
+        }
         delete gmailOAuthSessions[request.verifier_id];
         const next: MailAccount = {
           id: crypto.randomUUID(),
