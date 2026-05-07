@@ -29,6 +29,39 @@ import {
   THEME_MODE_STORAGE_KEY
 } from "./lib/storage";
 import { formatAuditLine, formatFolderCount, formatSendStatus } from "./lib/format";
+import {
+  getContextMenuActionItems,
+  shouldAutoMarkRead,
+  shouldRefreshAiInsightsForAnalyzedMessage
+} from "./lib/mailActions";
+import type { MailMessage } from "./api";
+
+function buildTestMessage(overrides: Partial<MailMessage> = {}): MailMessage {
+  return {
+    id: "msg-1",
+    account_id: "acct-1",
+    folder_id: "acct-1:inbox",
+    uid: "42",
+    message_id_header: "<msg-1@example.com>",
+    subject: "Deploy report",
+    sender: "ops@example.com",
+    recipients: ["me@example.com"],
+    cc: [],
+    received_at: "2026-05-07T00:00:00.000Z",
+    body_preview: "Deployment completed.",
+    body: "Deployment completed.",
+    attachments: [],
+    flags: {
+      is_read: false,
+      is_starred: false,
+      is_answered: false,
+      is_forwarded: false
+    },
+    size_bytes: 1024,
+    deleted_at: null,
+    ...overrides
+  };
+}
 
 describe("formatFolderCount", () => {
   it("shows total count when no messages are unread", () => {
@@ -37,6 +70,61 @@ describe("formatFolderCount", () => {
 
   it("shows unread and total counts when unread messages exist", () => {
     expect(formatFolderCount({ unread_count: 3, total_count: 8 })).toBe("3/8");
+  });
+});
+
+describe("mail action helpers", () => {
+  it("auto-marks only unread messages after selection", () => {
+    expect(shouldAutoMarkRead(buildTestMessage({ flags: { ...buildTestMessage().flags, is_read: false } }))).toBe(true);
+    expect(shouldAutoMarkRead(buildTestMessage({ flags: { ...buildTestMessage().flags, is_read: true } }))).toBe(false);
+    expect(shouldAutoMarkRead(null)).toBe(false);
+  });
+
+  it("builds context menu items for a message target without depending on selection", () => {
+    expect(
+      getContextMenuActionItems(buildTestMessage()).map((item) => [
+        item.kind,
+        item.label,
+        item.kind === "action" ? item.action : undefined,
+        item.disabled
+      ])
+    ).toEqual([
+      ["action", "READ", "mark_read", false],
+      ["action", "STAR", "star", false],
+      ["action", "DELETE", "delete", false],
+      ["analyze", "ANALYZE", undefined, false]
+    ]);
+  });
+
+  it("keeps read idempotent and uses unstar for already starred context menu targets", () => {
+    expect(
+      getContextMenuActionItems(
+        buildTestMessage({
+          flags: {
+            is_read: true,
+            is_starred: true,
+            is_answered: false,
+            is_forwarded: false
+          }
+        })
+      ).map((item) => [
+        item.kind,
+        item.label,
+        item.kind === "action" ? item.action : undefined,
+        item.disabled
+      ])
+    ).toEqual([
+      ["action", "READ", "mark_read", true],
+      ["action", "UNSTAR", "unstar", false],
+      ["action", "DELETE", "delete", false],
+      ["analyze", "ANALYZE", undefined, false]
+    ]);
+  });
+
+  it("refreshes AI insights only when the analyzed target is the open message", () => {
+    expect(shouldRefreshAiInsightsForAnalyzedMessage("msg-1", "msg-1")).toBe(true);
+    expect(shouldRefreshAiInsightsForAnalyzedMessage("msg-2", "msg-1")).toBe(false);
+    expect(shouldRefreshAiInsightsForAnalyzedMessage("msg-2", null)).toBe(false);
   });
 });
 

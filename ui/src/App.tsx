@@ -1,7 +1,6 @@
 import {
   Archive,
   BellDot,
-  CheckCheck,
   CircleAlert,
   Clock3,
   Database,
@@ -60,7 +59,6 @@ import {
   writeStoredWorkspaceSplitPercent,
   type ThemeMode
 } from "./lib/storage";
-import { actionLabels } from "./lib/mailActions";
 import { formatFolderCount, formatSize, formatTime } from "./lib/format";
 import {
   refreshAfterMailSyncEvent,
@@ -71,7 +69,12 @@ import {
 } from "./lib/syncFlows";
 import { getManualSyncButtonState } from "./lib/syncUi";
 import { appendActivityLogEntry, buildActivityLogText, type ActivityLogEntry } from "./lib/activityLog";
-
+import {
+  actionLabels,
+  getContextMenuActionItems,
+  shouldAutoMarkRead,
+  shouldRefreshAiInsightsForAnalyzedMessage
+} from "./lib/mailActions";
 const defaultAccountConfigForm: SaveAccountConfigRequest = {
   id: null,
   display_name: "",
@@ -140,6 +143,12 @@ export const MAIL_SYNC_EVENT = "agentmail-mail-sync";
 const WORKSPACE_LIST_MIN_WIDTH = 320;
 const WORKSPACE_DETAIL_MIN_WIDTH = 420;
 const WORKSPACE_DIVIDER_WIDTH = 8;
+
+interface MessageContextMenuState {
+  messageId: string;
+  x: number;
+  y: number;
+}
 
 const roleIcon = {
   inbox: Inbox,
@@ -216,6 +225,7 @@ export function App() {
   );
   const [workspaceAvailableWidth, setWorkspaceAvailableWidth] = useState<number | null>(null);
   const [isWorkspaceResizing, setWorkspaceResizing] = useState(false);
+  const [messageContextMenu, setMessageContextMenu] = useState<MessageContextMenuState | null>(null);
   const [isPending, startTransition] = useTransition();
   const mailWorkspaceRef = useRef<HTMLDivElement | null>(null);
   const messagesRef = useRef<MailMessage[]>([]);
@@ -224,6 +234,7 @@ export function App() {
   const selectedMessageIdRef = useRef<string | null>(null);
   const queryRef = useRef("");
   const lastForegroundSyncAtRef = useRef(0);
+  const autoReadInFlightRef = useRef<Set<string>>(new Set());
 
   const appendActivityLog = useCallback((message: string) => {
     setActivityLogEntries((current) => appendActivityLogEntry(current, message));
@@ -272,6 +283,10 @@ export function App() {
   const selectedFolder = useMemo(
     () => folders.find((folder) => folder.id === selectedFolderId) ?? null,
     [folders, selectedFolderId]
+  );
+  const contextMenuMessage = useMemo(
+    () => messages.find((message) => message.id === messageContextMenu?.messageId) ?? null,
+    [messageContextMenu?.messageId, messages]
   );
   const refreshAudits = useCallback(async () => {
     await api.getAuditLog(25);
@@ -376,6 +391,26 @@ export function App() {
   useEffect(() => {
     queryRef.current = query;
   }, [query]);
+
+  useEffect(() => {
+    setMessageContextMenu(null);
+  }, [selectedAccountId, selectedFolderId, query]);
+
+  useEffect(() => {
+    if (!messageContextMenu) return undefined;
+    const closeContextMenu = () => setMessageContextMenu(null);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeContextMenu();
+    };
+    window.addEventListener("click", closeContextMenu);
+    window.addEventListener("scroll", closeContextMenu, true);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("click", closeContextMenu);
+      window.removeEventListener("scroll", closeContextMenu, true);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [messageContextMenu]);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -530,21 +565,43 @@ export function App() {
     selectedFolderId
   ]);
 
-  const runAction = useCallback(
-    async (action: MailActionKind, targetFolderId?: string | null) => {
-      if (!selectedAccountId || !selectedMessageId || isActionRunning || isAnalyzing) return;
+  const applyLocalMessageAction = useCallback((messageId: string, action: MailActionKind) => {
+    const updateMessage = (message: MailMessage) => {
+      if (message.id !== messageId) return message;
+      if (action === "mark_read") {
+        return { ...message, flags: { ...message.flags, is_read: true } };
+      }
+      if (action === "mark_unread") {
+        return { ...message, flags: { ...message.flags, is_read: false } };
+      }
+      if (action === "star") {
+        return { ...message, flags: { ...message.flags, is_starred: true } };
+      }
+      if (action === "unstar") {
+        return { ...message, flags: { ...message.flags, is_starred: false } };
+      }
+      return message;
+    };
+    setMessages((current) => current.map(updateMessage));
+    setSelectedMessage((current) => (current ? updateMessage(current) : current));
+  }, []);
+
+  const runMessageAction = useCallback(
+    async (message: MailMessage, action: MailActionKind, targetFolderId?: string | null) => {
+      if (isActionRunning || isAnalyzing) return;
       setActionRunning(true);
       setStatus(`action running: ${actionLabels[action]}`);
-      appendActivityLog(`action started: ${actionLabels[action]} / ${selectedMessageId}`);
+      appendActivityLog(`action started: ${actionLabels[action]} / ${message.id}`);
       try {
         await api.executeMailAction({
           action,
-          account_id: selectedAccountId,
-          message_ids: [selectedMessageId],
+          account_id: message.account_id,
+          message_ids: [message.id],
           target_folder_id: targetFolderId ?? null
         });
-        await refreshFolders(selectedAccountId);
-        await refreshMessages(selectedAccountId, selectedFolderId, query);
+        applyLocalMessageAction(message.id, action);
+        await refreshFolders(message.account_id);
+        await refreshMessages(message.account_id, selectedFolderId, query);
         await refreshAudits();
         const nextStatus = `action executed: ${actionLabels[action]}`;
         setStatus(nextStatus);
@@ -559,17 +616,25 @@ export function App() {
     },
     [
       appendActivityLog,
+      applyLocalMessageAction,
       isActionRunning,
       isAnalyzing,
       query,
       refreshAudits,
       refreshFolders,
       refreshMessages,
-      selectedAccountId,
-      selectedFolderId,
-      selectedMessageId
+      selectedFolderId
     ]
   );
+
+  useEffect(() => {
+    if (!selectedMessage || !shouldAutoMarkRead(selectedMessage) || autoReadInFlightRef.current.has(selectedMessage.id)) return;
+    const message = selectedMessage;
+    autoReadInFlightRef.current.add(message.id);
+    void runMessageAction(message, "mark_read").finally(() => {
+      autoReadInFlightRef.current.delete(message.id);
+    });
+  }, [runMessageAction, selectedMessage]);
 
   const handleAccountConfigSaved = useCallback(
     async (account: MailAccount) => {
@@ -620,30 +685,60 @@ export function App() {
     [appendActivityLog, query, refreshAudits, refreshFolders, refreshMessages, selectedFolderId]
   );
 
-  const handleAnalyze = useCallback(async () => {
-    if (!selectedMessageId || isActionRunning) return;
-    const messageId = selectedMessageId;
+  const handleAnalyzeMessage = useCallback(async (message: MailMessage) => {
+    if (isActionRunning) return;
+    const messageId = message.id;
     setAnalyzing(true);
-    setAiStatus("ai analysis running");
+    setStatus(`ai analysis running: ${message.subject}`);
+    if (shouldRefreshAiInsightsForAnalyzedMessage(messageId, selectedMessageIdRef.current)) {
+      setAiStatus("ai analysis running");
+    }
     appendActivityLog(`ai analysis started: ${messageId}`);
     try {
       await api.runAiAnalysis(messageId);
-      if (selectedMessageIdRef.current !== messageId) return;
-      const insights = await api.listAiInsights(messageId);
-      if (selectedMessageIdRef.current !== messageId) return;
-      setAiInsights(insights);
-      setAiStatus("ai analysis complete");
+      if (shouldRefreshAiInsightsForAnalyzedMessage(messageId, selectedMessageIdRef.current)) {
+        const insights = await api.listAiInsights(messageId);
+        if (shouldRefreshAiInsightsForAnalyzedMessage(messageId, selectedMessageIdRef.current)) {
+          setAiInsights(insights);
+          setAiStatus("ai analysis complete");
+        }
+      }
+      setStatus(`ai analysis complete: ${message.subject}`);
       appendActivityLog(`ai analysis complete: ${messageId}`);
     } catch (error) {
-      if (selectedMessageIdRef.current === messageId) {
-        const nextStatus = `ai analysis failed: ${String(error)}`;
+      const nextStatus = `ai analysis failed: ${String(error)}`;
+      setStatus(nextStatus);
+      if (shouldRefreshAiInsightsForAnalyzedMessage(messageId, selectedMessageIdRef.current)) {
         setAiStatus(nextStatus);
         appendActivityLog(nextStatus);
+      } else {
+        appendActivityLog(`ai analysis failed: ${messageId} / ${String(error)}`);
       }
     } finally {
       setAnalyzing(false);
     }
-  }, [appendActivityLog, isActionRunning, selectedMessageId]);
+  }, [appendActivityLog, isActionRunning]);
+
+  const handleSelectedAnalyze = useCallback(async () => {
+    if (!selectedMessage) return;
+    await handleAnalyzeMessage(selectedMessage);
+  }, [handleAnalyzeMessage, selectedMessage]);
+
+  const handleContextMenuAction = useCallback(
+    (message: MailMessage, action: MailActionKind) => {
+      setMessageContextMenu(null);
+      void runMessageAction(message, action);
+    },
+    [runMessageAction]
+  );
+
+  const handleContextMenuAnalyze = useCallback(
+    (message: MailMessage) => {
+      setMessageContextMenu(null);
+      void handleAnalyzeMessage(message);
+    },
+    [handleAnalyzeMessage]
+  );
 
   const measureWorkspaceAvailableWidth = useCallback(() => {
     const workspace = mailWorkspaceRef.current;
@@ -839,7 +934,18 @@ export function App() {
                   className={`message-row ${message.id === selectedMessageId ? "active" : ""} ${message.flags.is_read ? "read" : "unread"}`}
                   key={message.id}
                   type="button"
-                  onClick={() => setSelectedMessageId(message.id)}
+                  onClick={() => {
+                    setMessageContextMenu(null);
+                    setSelectedMessageId(message.id);
+                  }}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setMessageContextMenu({
+                      messageId: message.id,
+                      x: event.clientX,
+                      y: event.clientY
+                    });
+                  }}
                 >
                   <span className="row-status">{message.flags.is_starred ? <Star size={14} fill="currentColor" /> : <Clock3 size={14} />}</span>
                   <span className="row-main">
@@ -852,6 +958,33 @@ export function App() {
               ))}
               {messages.length === 0 ? <div className="empty-state">No indexed mail in this folder.</div> : null}
             </div>
+            {messageContextMenu && contextMenuMessage ? (
+              <div
+                className="message-context-menu"
+                role="menu"
+                aria-label="Message actions"
+                style={{ left: messageContextMenu.x, top: messageContextMenu.y }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                {getContextMenuActionItems(contextMenuMessage).map((item) => (
+                  <button
+                    key={item.label}
+                    type="button"
+                    role="menuitem"
+                    disabled={item.disabled || isActionRunning || isAnalyzing}
+                    onClick={() => {
+                      if (item.kind === "analyze") {
+                        handleContextMenuAnalyze(contextMenuMessage);
+                      } else {
+                        handleContextMenuAction(contextMenuMessage, item.action);
+                      }
+                    }}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </section>
 
           <div
@@ -875,21 +1008,13 @@ export function App() {
                 <div className="detail-toolbar">
                   <button
                     type="button"
-                    onClick={() => runAction(selectedMessage.flags.is_read ? "mark_unread" : "mark_read")}
-                    disabled={isActionRunning || isAnalyzing}
-                  >
-                    <CheckCheck size={15} />
-                    {selectedMessage.flags.is_read ? "UNREAD" : "READ"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => runAction(selectedMessage.flags.is_starred ? "unstar" : "star")}
+                    onClick={() => runMessageAction(selectedMessage, selectedMessage.flags.is_starred ? "unstar" : "star")}
                     disabled={isActionRunning || isAnalyzing}
                   >
                     <Star size={15} />
                     {selectedMessage.flags.is_starred ? "UNSTAR" : "STAR"}
                   </button>
-                  <button type="button" onClick={() => runAction("delete")} disabled={isActionRunning || isAnalyzing}>
+                  <button type="button" onClick={() => runMessageAction(selectedMessage, "delete")} disabled={isActionRunning || isAnalyzing}>
                     <Trash2 size={15} />
                     DELETE
                   </button>
@@ -936,7 +1061,7 @@ export function App() {
                     status={aiStatus}
                     isAnalyzing={isAnalyzing}
                     isActionRunning={isActionRunning}
-                    onAnalyze={handleAnalyze}
+                    onAnalyze={handleSelectedAnalyze}
                   />
                 </div>
               </>
