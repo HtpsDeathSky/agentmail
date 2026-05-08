@@ -960,6 +960,9 @@ impl AppApi {
             received_at: now.clone(),
             body_preview: body_preview_from_body(&draft.body),
             body: Some(draft.body.clone()),
+            html_body: None,
+            raw_mime: None,
+            inline_resources: Vec::new(),
             attachments: Vec::new(),
             flags: mail_core::MessageFlags {
                 is_read: true,
@@ -1459,9 +1462,9 @@ impl AppApi {
                 self.store
                     .move_messages_and_clear_uids(&request.message_ids, &target.id)?;
             }
-            MailActionKind::PermanentDelete => {
-                self.store.soft_delete_messages(&request.message_ids)?
-            }
+            MailActionKind::PermanentDelete => self
+                .store
+                .soft_delete_messages_and_raw_sources(&request.message_ids)?,
             _ => {
                 return Err(ApiError::InvalidRequest(format!(
                     "unsupported confirmed mail action: {:?}",
@@ -2839,6 +2842,9 @@ mod tests {
             received_at: "2026-04-28T10:00:00Z".to_string(),
             body_preview: "same body".to_string(),
             body: Some("same body".to_string()),
+            html_body: None,
+            raw_mime: None,
+            inline_resources: Vec::new(),
             attachments: Vec::new(),
             flags: mail_core::MessageFlags {
                 is_read: true,
@@ -2854,6 +2860,9 @@ mod tests {
             uid: Some("40".to_string()),
             message_id_header: Some("<provider-old@example.com>".to_string()),
             received_at: "2026-04-28T09:59:59Z".to_string(),
+            html_body: None,
+            raw_mime: None,
+            inline_resources: Vec::new(),
             ..local.clone()
         };
         let newer_remote = MailMessage {
@@ -2861,6 +2870,9 @@ mod tests {
             uid: Some("41".to_string()),
             message_id_header: Some("<provider-new@example.com>".to_string()),
             received_at: "2026-04-28T10:00:01Z".to_string(),
+            html_body: None,
+            raw_mime: None,
+            inline_resources: Vec::new(),
             ..local.clone()
         };
 
@@ -3678,6 +3690,9 @@ mod tests {
                 received_at: message.received_at.clone(),
                 body_preview: message.body_preview.clone(),
                 body: message.body.clone(),
+                html_body: None,
+                raw_mime: None,
+                inline_resources: Vec::new(),
                 attachments: Vec::new(),
                 flags: message.flags.clone(),
                 size_bytes: message.size_bytes,
@@ -3796,6 +3811,54 @@ mod tests {
         assert_eq!(recorded[1].uids, vec!["900".to_string()]);
         drop(recorded);
 
+        assert!(api
+            .store
+            .get_message(&message.id)
+            .unwrap()
+            .deleted_at
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn permanent_delete_from_trash_removes_local_raw_mime_source() {
+        let protocol = RecordingProtocol::default();
+        let trash_refetch_uid = Arc::clone(&protocol.trash_refetch_uid);
+        let api = AppApi::new(MailStore::memory().unwrap(), Arc::new(protocol));
+        let account = add_sample_account(&api).await;
+        api.sync_account(account.id.clone()).await.unwrap();
+        let mut message = first_message(&api, &account.id);
+        let raw_mime = b"From: sec@example.com\r\nTo: ops@example.com\r\n\r\nreview".to_vec();
+        message.raw_mime = Some(raw_mime.clone());
+        api.store.upsert_message(&message).unwrap();
+        assert_eq!(
+            api.store.get_raw_mime_source(&message.id).unwrap(),
+            Some(raw_mime.clone())
+        );
+
+        api.execute_mail_action(MailActionRequest {
+            action: MailActionKind::Delete,
+            account_id: account.id.clone(),
+            message_ids: vec![message.id.clone()],
+            target_folder_id: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            api.store.get_raw_mime_source(&message.id).unwrap(),
+            Some(raw_mime)
+        );
+        *trash_refetch_uid.lock() = Some("900".to_string());
+
+        api.execute_mail_action(MailActionRequest {
+            action: MailActionKind::Delete,
+            account_id: account.id.clone(),
+            message_ids: vec![message.id.clone()],
+            target_folder_id: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(api.store.get_raw_mime_source(&message.id).unwrap(), None);
         assert!(api
             .store
             .get_message(&message.id)
@@ -4024,6 +4087,9 @@ mod tests {
             subject: "Second action".to_string(),
             body_preview: "second".to_string(),
             body: Some("second".to_string()),
+            html_body: None,
+            raw_mime: None,
+            inline_resources: Vec::new(),
             ..message.clone()
         };
         api.store.upsert_message(&second).unwrap();
@@ -4062,6 +4128,9 @@ mod tests {
             subject: "Second trash action".to_string(),
             body_preview: "second trash".to_string(),
             body: Some("second trash".to_string()),
+            html_body: None,
+            raw_mime: None,
+            inline_resources: Vec::new(),
             ..message.clone()
         };
         api.store.upsert_message(&second).unwrap();
@@ -4110,6 +4179,9 @@ mod tests {
             subject: "Second action".to_string(),
             body_preview: "second".to_string(),
             body: Some("second".to_string()),
+            html_body: None,
+            raw_mime: None,
+            inline_resources: Vec::new(),
             ..message.clone()
         };
         api.store.upsert_message(&second).unwrap();
@@ -4690,6 +4762,9 @@ mod tests {
                 received_at: now_rfc3339(),
                 body_preview: "body".to_string(),
                 body: Some("body".to_string()),
+                html_body: None,
+                raw_mime: None,
+                inline_resources: Vec::new(),
                 attachments: Vec::new(),
                 flags: mail_core::MessageFlags {
                     is_read: false,
@@ -4780,6 +4855,9 @@ mod tests {
                     received_at: now_rfc3339(),
                     body_preview: format!("snapshot body {uid}"),
                     body: Some(format!("snapshot body {uid}")),
+                    html_body: None,
+                    raw_mime: None,
+                    inline_resources: Vec::new(),
                     attachments: Vec::new(),
                     flags: mail_core::MessageFlags {
                         is_read: false,
@@ -4879,6 +4957,9 @@ mod tests {
                 received_at: now_rfc3339(),
                 body_preview: "body".to_string(),
                 body: Some("body".to_string()),
+                html_body: None,
+                raw_mime: None,
+                inline_resources: Vec::new(),
                 attachments: Vec::new(),
                 flags: mail_core::MessageFlags {
                     is_read: true,
@@ -5058,6 +5139,9 @@ mod tests {
                     received_at: now_rfc3339(),
                     body_preview: "review".to_string(),
                     body: Some("review".to_string()),
+                    html_body: None,
+                    raw_mime: None,
+                    inline_resources: Vec::new(),
                     attachments: Vec::new(),
                     flags: mail_core::MessageFlags {
                         is_read: false,
@@ -5085,6 +5169,9 @@ mod tests {
                 received_at: now_rfc3339(),
                 body_preview: "review".to_string(),
                 body: Some("review".to_string()),
+                html_body: None,
+                raw_mime: None,
+                inline_resources: Vec::new(),
                 attachments: Vec::new(),
                 flags: mail_core::MessageFlags {
                     is_read: false,
@@ -5249,6 +5336,9 @@ mod tests {
                 received_at: now_rfc3339(),
                 body_preview: "ok".to_string(),
                 body: Some("ok".to_string()),
+                html_body: None,
+                raw_mime: None,
+                inline_resources: Vec::new(),
                 attachments: Vec::new(),
                 flags: mail_core::MessageFlags::default(),
                 size_bytes: Some(128),

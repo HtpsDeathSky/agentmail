@@ -151,6 +151,17 @@ pub struct AttachmentRef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InlineResource {
+    pub id: String,
+    pub message_id: String,
+    pub content_id: String,
+    #[serde(default)]
+    pub filename: Option<String>,
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MailMessage {
     pub id: String,
     pub account_id: String,
@@ -164,6 +175,12 @@ pub struct MailMessage {
     pub received_at: Timestamp,
     pub body_preview: String,
     pub body: Option<String>,
+    #[serde(default)]
+    pub html_body: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub raw_mime: Option<Vec<u8>>,
+    #[serde(default)]
+    pub inline_resources: Vec<InlineResource>,
     pub attachments: Vec<AttachmentRef>,
     pub flags: MessageFlags,
     pub size_bytes: Option<i64>,

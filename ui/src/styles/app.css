@@ -278,7 +278,8 @@ select {
 .rail-title,
 .column-header span,
 .status-console span,
-.metadata-grid dt,
+.recipient-row > span,
+.message-secondary-meta,
 .modal-panel h2 {
   font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
   letter-spacing: 0;
@@ -735,33 +736,121 @@ select {
   background: var(--color-border-strong);
 }
 
-.metadata-grid {
+.message-envelope {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin: 20px 0;
-}
-
-.metadata-grid div {
+  gap: 12px;
+  margin: 18px 0 16px;
   min-width: 0;
-  padding: 10px;
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  background: var(--color-surface);
+  padding: 13px 14px;
+  border-block: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
+  overflow-wrap: anywhere;
 }
 
-.metadata-grid dt {
+.sender-identity {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+
+.sender-avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--color-accent-border-soft);
+  border-radius: 4px;
+  background: var(--color-accent-surface);
+  color: var(--color-warning-bright);
+  font: 700 15px "Cascadia Mono", Consolas, monospace;
+}
+
+.sender-identity strong,
+.sender-identity span,
+.recipient-chip,
+.recipient-chip small {
+  overflow-wrap: anywhere;
+}
+
+.sender-identity strong {
+  display: block;
+  color: var(--color-text-strong-4);
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.sender-identity div > span {
+  display: block;
+  margin-top: 2px;
+  color: var(--color-text-muted-2);
+  font: 12px "Cascadia Mono", Consolas, monospace;
+}
+
+.recipient-rows {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.recipient-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  min-width: 0;
+}
+
+.recipient-row > span {
+  padding-top: 4px;
   color: var(--color-text-muted-11);
   font-size: 10px;
 }
 
-.metadata-grid dd {
-  margin: 5px 0 0;
-  overflow: hidden;
-  color: var(--color-text-soft);
-  font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.recipient-row > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.recipient-chip {
+  display: inline-flex;
+  gap: 5px;
+  align-items: baseline;
+  max-width: 100%;
+  min-width: 0;
+  padding: 4px 7px;
+  border: 1px solid var(--color-border-soft);
+  border-radius: 3px;
+  background: var(--color-input-bg);
+  color: var(--color-text-soft-2);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.recipient-chip small {
+  color: var(--color-text-muted-3);
+  font: 11px "Cascadia Mono", Consolas, monospace;
+}
+
+.message-secondary-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+  color: var(--color-text-muted-4);
+  font-size: 10px;
+}
+
+.message-secondary-meta span {
+  max-width: 100%;
+  padding: 3px 6px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 3px;
+  background: var(--color-surface);
+  overflow-wrap: anywhere;
 }
 
 .body-block {
@@ -775,6 +864,47 @@ select {
   border-radius: 4px;
   background: var(--color-input-bg);
   font: 13px/1.65 "Cascadia Mono", Consolas, monospace;
+}
+
+.body-html-block {
+  min-width: 0;
+  min-height: 220px;
+  padding: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-input-bg);
+  color: var(--color-text-soft-3);
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.body-html-block :first-child {
+  margin-top: 0;
+}
+
+.body-html-block :last-child {
+  margin-bottom: 0;
+}
+
+.body-html-block img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 3px;
+}
+
+.body-html-block a {
+  color: var(--color-warning-bright);
+}
+
+.body-html-block table {
+  max-width: 100%;
+  border-collapse: collapse;
+}
+
+.body-html-block td,
+.body-html-block th {
+  overflow-wrap: anywhere;
 }
 
 .attachment-strip {
@@ -1462,8 +1592,12 @@ select {
   }
 
   .form-grid,
-  .metadata-grid {
+  .recipient-row {
     grid-template-columns: 1fr;
+  }
+
+  .recipient-row > span {
+    padding-top: 0;
   }
 }
 
