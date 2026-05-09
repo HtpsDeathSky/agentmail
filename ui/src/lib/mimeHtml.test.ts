@@ -113,4 +113,17 @@ describe("buildRenderableHtml", () => {
 
     expect(document.querySelector("img")?.hasAttribute("src")).toBe(false);
   });
+
+  it("keeps remote image sources but strips remote media sources", () => {
+    const rendered = buildRenderableHtml(
+      '<img src="https://cdn.example.com/logo.png"><video src="https://cdn.example.com/movie.mp4"></video><audio src="https://cdn.example.com/clip.mp3"></audio><source src="https://cdn.example.com/clip.webm">',
+      []
+    );
+    const document = new DOMParser().parseFromString(rendered, "text/html");
+
+    expect(document.querySelector("img")?.getAttribute("src")).toBe("https://cdn.example.com/logo.png");
+    expect(document.querySelector("video")?.hasAttribute("src")).toBe(false);
+    expect(document.querySelector("audio")?.hasAttribute("src")).toBe(false);
+    expect(document.querySelector("source")?.hasAttribute("src")).toBe(false);
+  });
 });

@@ -83,7 +83,7 @@ function sanitizeAttributes(element: HTMLElement) {
       continue;
     }
 
-    if (name === "src" && !isSafeSrc(attribute.value)) {
+    if (name === "src" && !isSafeSrc(element, attribute.value)) {
       element.removeAttribute(attribute.name);
       continue;
     }
@@ -109,7 +109,9 @@ function isSafeHref(value: string) {
   return protocol === "http:" || protocol === "https:" || protocol === "mailto:";
 }
 
-function isSafeSrc(value: string) {
+function isSafeSrc(element: HTMLElement, value: string) {
+  if (!(element instanceof HTMLImageElement)) return false;
+
   const protocol = extractProtocol(value);
 
   if (protocol === "http:" || protocol === "https:") return true;

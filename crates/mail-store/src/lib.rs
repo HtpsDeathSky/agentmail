@@ -569,7 +569,7 @@ impl MailStore {
                 query.limit as i64,
                 query.offset as i64,
             ],
-            message_from_row,
+            message_summary_from_row,
         )?;
         collect_rows(rows)
     }
@@ -629,7 +629,7 @@ impl MailStore {
             LIMIT ?2
             "#,
         )?;
-        let rows = stmt.query_map(params![fts_query, limit as i64], message_from_row)?;
+        let rows = stmt.query_map(params![fts_query, limit as i64], message_summary_from_row)?;
         collect_rows(rows)
     }
 
@@ -829,6 +829,7 @@ impl MailStore {
             )?;
             tx.execute("DELETE FROM message_fts WHERE message_id = ?1", params![id])?;
         }
+        delete_raw_mime_sources_tx(&tx, &stale_ids)?;
         tx.commit()?;
         Ok(stale_ids.len())
     }
@@ -1678,6 +1679,17 @@ fn folder_from_row(row: &Row<'_>) -> rusqlite::Result<MailFolder> {
 }
 
 fn message_from_row(row: &Row<'_>) -> rusqlite::Result<MailMessage> {
+    message_from_row_with_inline_resources(row, true)
+}
+
+fn message_summary_from_row(row: &Row<'_>) -> rusqlite::Result<MailMessage> {
+    message_from_row_with_inline_resources(row, false)
+}
+
+fn message_from_row_with_inline_resources(
+    row: &Row<'_>,
+    include_inline_resources: bool,
+) -> rusqlite::Result<MailMessage> {
     let recipients_json: String = row.get(7)?;
     let cc_json: String = row.get(8)?;
     let attachments_json: String = row.get(12)?;
@@ -1687,8 +1699,11 @@ fn message_from_row(row: &Row<'_>) -> rusqlite::Result<MailMessage> {
     let cc = serde_json::from_str(&cc_json).unwrap_or_default();
     let attachments =
         serde_json::from_str::<Vec<AttachmentRef>>(&attachments_json).unwrap_or_default();
-    let inline_resources =
-        serde_json::from_str::<Vec<InlineResource>>(&inline_resources_json).unwrap_or_default();
+    let inline_resources = if include_inline_resources {
+        serde_json::from_str::<Vec<InlineResource>>(&inline_resources_json).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     Ok(MailMessage {
         id: row.get(0)?,
@@ -2041,6 +2056,48 @@ mod tests {
     }
 
     #[test]
+    fn list_and_search_messages_omit_inline_resource_bytes() {
+        let store = MailStore::memory().unwrap();
+        let now = now_rfc3339();
+        let account = test_account(&now);
+        let folder = test_folder(&account.id);
+        store.save_account(&account).unwrap();
+        store.save_folder(&folder).unwrap();
+
+        let mut message = test_message(&account.id, &folder.id, "message-html", "43", &now);
+        message.html_body = Some("<p>Hello <img src=\"cid:logo@example.com\"></p>".to_string());
+        message.inline_resources = vec![InlineResource {
+            id: "inline-1".to_string(),
+            message_id: message.id.clone(),
+            content_id: "logo@example.com".to_string(),
+            filename: Some("logo.png".to_string()),
+            mime_type: "image/png".to_string(),
+            bytes: b"image".to_vec(),
+        }];
+        store.upsert_message(&message).unwrap();
+
+        let listed = store
+            .list_messages(&MessageQuery {
+                account_id: Some(account.id.clone()),
+                folder_id: Some(folder.id.clone()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].html_body, message.html_body);
+        assert!(listed[0].inline_resources.is_empty());
+
+        let hits = store.search_messages("Raw MIME", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, message.id);
+        assert!(hits[0].inline_resources.is_empty());
+
+        let loaded = store.get_message(&message.id).unwrap();
+        assert_eq!(loaded.inline_resources, message.inline_resources);
+    }
+
+    #[test]
     fn raw_mime_survives_metadata_upsert_without_raw_body() {
         let (store, mut message) = save_raw_mime_fixture();
         message.subject = "Metadata refresh".to_string();
@@ -2066,6 +2123,18 @@ mod tests {
             store.raw_mime_len_for_test(&message.id).unwrap(),
             Some(b"From: a@example.com\r\n\r\nbody".len())
         );
+        assert!(store.get_message(&message.id).unwrap().deleted_at.is_some());
+    }
+
+    #[test]
+    fn reconcile_folder_remote_uids_removes_raw_mime_for_absent_remote_message() {
+        let (store, message) = save_raw_mime_fixture();
+
+        store
+            .reconcile_folder_remote_uids(&message.account_id, &message.folder_id, &HashSet::new())
+            .unwrap();
+
+        assert_eq!(store.raw_mime_len_for_test(&message.id).unwrap(), None);
         assert!(store.get_message(&message.id).unwrap().deleted_at.is_some());
     }
 
