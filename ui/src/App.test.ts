@@ -1,5 +1,8 @@
+import { act, createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
 import {
+  App,
   clampWorkspaceSplitPercent,
   canStartGoogleSignIn,
   formatGoogleSignInError,
@@ -36,6 +39,64 @@ import {
 } from "./lib/mailActions";
 import type { MailMessage } from "./api";
 
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+async function renderAppForTest() {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  let root: Root | null = null;
+
+  await act(async () => {
+    root = createRoot(container);
+    root.render(createElement(App));
+  });
+
+  return {
+    container,
+    async unmount() {
+      if (!root) return;
+      await act(async () => {
+        root?.unmount();
+      });
+      container.remove();
+    }
+  };
+}
+
+async function findSelector(container: ParentNode, selector: string, timeoutMs = 3000) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const match = container.querySelector(selector);
+    if (match) return match;
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 25));
+    });
+  }
+
+  throw new Error(`Selector not found: ${selector}`);
+}
+
+async function findText(container: ParentNode, text: string, timeoutMs = 3000) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const match = queryText(container, text);
+    if (match) return match;
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 25));
+    });
+  }
+
+  throw new Error(`Text not found: ${text}`);
+}
+
+function queryText(container: ParentNode, text: string) {
+  return Array.from(container.querySelectorAll("*")).find((element) => element.textContent?.trim() === text) ?? null;
+}
+
 function buildTestMessage(overrides: Partial<MailMessage> = {}): MailMessage {
   return {
     id: "msg-1",
@@ -50,6 +111,8 @@ function buildTestMessage(overrides: Partial<MailMessage> = {}): MailMessage {
     received_at: "2026-05-07T00:00:00.000Z",
     body_preview: "Deployment completed.",
     body: "Deployment completed.",
+    html_body: null,
+    inline_resources: [],
     attachments: [],
     flags: {
       is_read: false,
@@ -62,6 +125,29 @@ function buildTestMessage(overrides: Partial<MailMessage> = {}): MailMessage {
     ...overrides
   };
 }
+
+describe("message detail rendering", () => {
+  it("renders html message body and mail-style header fields", async () => {
+    const app = await renderAppForTest();
+
+    try {
+      const htmlMessage = await findText(app.container, "HTML newsletter preview");
+      await act(async () => {
+        htmlMessage.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      const htmlBlock = await findSelector(app.container, ".body-html-block");
+      expect(queryText(htmlBlock, "HTML Body")).not.toBeNull();
+      expect(app.container.querySelector(".metadata-grid")).toBeNull();
+      expect(await findText(app.container, "Sender")).not.toBeNull();
+      expect(await findText(app.container, "sender@example.com")).not.toBeNull();
+      expect(await findText(app.container, "ops@example.com")).not.toBeNull();
+      expect(await findText(app.container, "audit@example.com")).not.toBeNull();
+    } finally {
+      await app.unmount();
+    }
+  });
+});
 
 describe("formatFolderCount", () => {
   it("shows total count when no messages are unread", () => {

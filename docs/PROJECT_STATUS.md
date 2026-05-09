@@ -1,12 +1,12 @@
 # Project Status
 
-Last updated: 2026-05-06
+Last updated: 2026-05-08
 
 ## Current Source of Truth
 
 - Repository: `HtpsDeathSky/agentmail`
-- Branch: `feature/gmail-compatibility`
-- Gmail compatibility development is active on this branch. Do not assume these Gmail notes are on `main` until the branch is merged.
+- Branch: `feature/mime-browsing-foundation`
+- MIME browsing foundation development is active on this branch. Do not assume these MIME browsing notes are on `main` until the branch is merged.
 - Direct-actions cleanup and consistency-first automatic sync are implemented on `main`; this status includes direct-send result hardening, browser-demo parity fixes, and the 2026-04-29 shift away from active QQ IDLE watcher sync.
 - Current working tree: run `git status --short` in the active checkout before starting new work.
 - Local working tree note: `.codex` may appear as an untracked local directory; do not treat it as project state and do not commit it.
@@ -39,7 +39,9 @@ The user flow is:
 - Automatic refresh is consistency-sync driven for all enabled accounts; startup, foreground resume, a 120-second running-app interval, account save, and manual sync all use account-level sync.
 - IMAP IDLE watcher code remains isolated for future providers, but it is not part of the active sync path in this stage.
 - Folder create/delete discovery is not realtime in this stage; startup, account save, interval, foreground, or manual sync refreshes the folder list.
-- MIME parsing with body text storage and attachment metadata indexing; attachment files are not downloaded.
+- MIME parsing stores plaintext, HTML body, inline CID image resources, attachment metadata, and raw RFC822 MIME source for synced messages.
+- Message detail prefers sanitized HTML when available, loads remote images by default, supports inline CID images, and falls back to plaintext.
+- Permanent delete removes locally stored raw MIME while ordinary delete-to-Trash keeps raw MIME with the local message row.
 - Folder counts are refreshed from locally stored messages after sync and direct actions.
 - SMTP sending uses `lettre`; port `465` uses implicit TLS and port `587` uses STARTTLS.
 - SMTP send executes directly from the compose flow and records executed or failed audit entries.
@@ -60,20 +62,22 @@ The user flow is:
 - Mailbox passwords are stored plaintext in SQLite. Windows Credential Manager is no longer used.
 - Gmail OAuth is implemented for internal testing, using `AGENTMAIL_GOOGLE_OAUTH_CLIENT_ID`; public distribution still needs Google OAuth consent setup and app verification.
 - The current desktop OAuth callback UX still needs a polished loopback completion flow; the UI can start Google sign-in and complete the token exchange, but the callback handling should be hardened before public release.
-- Attachment files are not downloaded yet.
+- Attachment files are not downloaded yet; inline CID images used by HTML message bodies are displayed, but ordinary attachments remain metadata-only.
 - Permanent delete is limited to messages already in Trash and should be tested only with disposable mail.
 - Move/archive backend support exists, but not all controls are exposed in the current UI.
 - No tray mode, notifications, contacts, rules, calendar, templates, or multi-window support yet.
 
 ## Recent Verification
 
-For Gmail compatibility work, the following checks passed on 2026-05-06:
+For MIME browsing foundation work, the following checks passed on 2026-05-08:
 
 - `cargo fmt --all --check`
 - `git diff --check`
 - `cargo test -p mail-core -p mail-store -p mail-protocol -p ai-remote -p app-api`
 - `pnpm test`
 - `pnpm build`
+- `pnpm rust:check`
+- Browser verification at `http://127.0.0.1:1420/` confirmed the HTML demo message renders the improved header, sanitized HTML body, remote image, and inline CID image on desktop and narrow viewports.
 
 Environment caveat:
 

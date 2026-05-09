@@ -75,6 +75,7 @@ import {
   shouldAutoMarkRead,
   shouldRefreshAiInsightsForAnalyzedMessage
 } from "./lib/mailActions";
+import { buildRenderableHtml } from "./lib/mimeHtml";
 const defaultAccountConfigForm: SaveAccountConfigRequest = {
   id: null,
   display_name: "",
@@ -192,6 +193,24 @@ export function getWorkspaceSplitModel(
     percent: clampedPercent,
     minPercent,
     maxPercent
+  };
+}
+
+function splitMailbox(value: string) {
+  const trimmed = value.trim();
+  const match = trimmed.match(/^(.*?)\s*<([^>]+)>$/);
+
+  if (!match) {
+    return {
+      name: trimmed,
+      email: trimmed.includes("@") ? trimmed : ""
+    };
+  }
+
+  const email = match[2].trim();
+  return {
+    name: match[1].trim() || email,
+    email
   };
 }
 
@@ -846,6 +865,20 @@ export function App() {
   )} percent`;
   const manualSyncButton = getManualSyncButtonState(selectedAccountId, isManualSyncing);
   const activityLogText = buildActivityLogText(activityLogEntries);
+  const selectedSender = selectedMessage ? splitMailbox(selectedMessage.sender) : null;
+  const selectedRecipients = selectedMessage?.recipients.map(splitMailbox) ?? [];
+  const selectedCc = selectedMessage?.cc.map(splitMailbox) ?? [];
+  const selectedMessageSecondaryMeta = selectedMessage
+    ? [
+        formatTime(selectedMessage.received_at),
+        formatSize(selectedMessage.size_bytes),
+        `UID ${selectedMessage.uid ?? "LOCAL"}`,
+        `Message-ID ${selectedMessage.message_id_header ?? "N/A"}`
+      ]
+    : [];
+  const selectedRenderableHtml = selectedMessage?.html_body
+    ? buildRenderableHtml(selectedMessage.html_body, selectedMessage.inline_resources ?? [])
+    : null;
 
   return (
     <main className={getAppShellClassName(showActivityLog)}>
@@ -1025,25 +1058,51 @@ export function App() {
                       <span className={selectedMessage.flags.is_read ? "read-dot" : "unread-dot"} />
                       <h1>{selectedMessage.subject}</h1>
                     </div>
-                    <dl className="metadata-grid">
-                      <div>
-                        <dt>FROM</dt>
-                        <dd>{selectedMessage.sender}</dd>
+                    <div className="message-envelope">
+                      <div className="sender-identity">
+                        <span className="sender-avatar">{selectedSender?.name.slice(0, 1).toUpperCase() || "@"}</span>
+                        <div>
+                          <strong>{selectedSender?.name}</strong>
+                          {selectedSender?.email ? <span>{selectedSender.email}</span> : null}
+                        </div>
                       </div>
-                      <div>
-                        <dt>TO</dt>
-                        <dd>{selectedMessage.recipients.join(", ")}</dd>
+                      <div className="recipient-rows">
+                        <div className="recipient-row">
+                          <span>TO</span>
+                          <div>
+                            {selectedRecipients.map((recipient, index) => (
+                              <span className="recipient-chip" key={`${recipient.email || recipient.name}-${index}`}>
+                                {recipient.name}
+                                {recipient.email && recipient.email !== recipient.name ? <small>{recipient.email}</small> : null}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                        {selectedCc.length > 0 ? (
+                          <div className="recipient-row">
+                            <span>CC</span>
+                            <div>
+                              {selectedCc.map((recipient, index) => (
+                                <span className="recipient-chip" key={`${recipient.email || recipient.name}-${index}`}>
+                                  {recipient.name}
+                                  {recipient.email && recipient.email !== recipient.name ? <small>{recipient.email}</small> : null}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
                       </div>
-                      <div>
-                        <dt>UID</dt>
-                        <dd>{selectedMessage.uid ?? "LOCAL"}</dd>
+                      <div className="message-secondary-meta">
+                        {selectedMessageSecondaryMeta.map((item) => (
+                          <span key={item}>{item}</span>
+                        ))}
                       </div>
-                      <div>
-                        <dt>SIZE</dt>
-                        <dd>{formatSize(selectedMessage.size_bytes)}</dd>
-                      </div>
-                    </dl>
-                    <pre className="body-block">{selectedMessage.body ?? selectedMessage.body_preview}</pre>
+                    </div>
+                    {selectedRenderableHtml ? (
+                      <div className="body-html-block" dangerouslySetInnerHTML={{ __html: selectedRenderableHtml }} />
+                    ) : (
+                      <pre className="body-block">{selectedMessage.body ?? selectedMessage.body_preview}</pre>
+                    )}
                     {selectedMessage.attachments.length > 0 ? (
                       <div className="attachment-strip">
                         {selectedMessage.attachments.map((attachment) => (

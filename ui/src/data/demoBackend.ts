@@ -67,9 +67,51 @@ let messages: MailMessage[] = [
     received_at: now(),
     body_preview: "Credential rotation window opens tonight. Confirm service owners and blackout exceptions before 18:00.",
     body: "Credential rotation window opens tonight. Confirm service owners and blackout exceptions before 18:00.\n\nThe initial desktop MVP keeps all AI pipelines disabled until the base mail engine is stable.",
+    html_body: null,
+    inline_resources: [],
     attachments: [],
     flags: { is_read: false, is_starred: true, is_answered: false, is_forwarded: false },
     size_bytes: 4096,
+    deleted_at: null
+  },
+  {
+    id: "msg-html-001",
+    account_id: account.id,
+    folder_id: folders[0].id,
+    uid: "1000",
+    message_id_header: "<html-newsletter-preview@example.com>",
+    subject: "HTML newsletter preview",
+    sender: "Sender <sender@example.com>",
+    recipients: ["ops@example.com"],
+    cc: ["audit@example.com"],
+    received_at: now(),
+    body_preview: "HTML Body",
+    body: "Plain fallback",
+    html_body: `
+      <section>
+        <h2>HTML Body</h2>
+        <p>Remote image follows.</p>
+        <img src="https://example.com/pixel.png" alt="remote pixel">
+        <img src="cid:logo@example.com" alt="inline logo">
+      </section>
+    `,
+    inline_resources: [
+      {
+        id: "inline-html-001-logo",
+        message_id: "msg-html-001",
+        content_id: "logo@example.com",
+        filename: "logo.png",
+        mime_type: "image/png",
+        bytes: [
+          137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0,
+          0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 255, 255, 63, 0, 5, 254, 2,
+          254, 220, 204, 89, 231, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+        ]
+      }
+    ],
+    attachments: [],
+    flags: { is_read: false, is_starred: false, is_answered: false, is_forwarded: false },
+    size_bytes: 5120,
     deleted_at: null
   },
   {
@@ -85,6 +127,8 @@ let messages: MailMessage[] = [
     received_at: now(),
     body_preview: "Three invoices are waiting for reconciliation. Attachment metadata is indexed but files are not downloaded yet.",
     body: "Three invoices are waiting for reconciliation. Attachment metadata is indexed but files are not downloaded yet.\n\nFuture local sensitivity review will block remote AI upload for financial and legal material by default.",
+    html_body: null,
+    inline_resources: [],
     attachments: [
       { id: "att-001", message_id: "msg-002", filename: "invoice-pack.zip", mime_type: "application/zip", size_bytes: 2489000, local_path: null }
     ],
@@ -105,6 +149,8 @@ let messages: MailMessage[] = [
     received_at: now(),
     body_preview: "Build 42 passed smoke tests. Mail client telemetry remains disabled in this MVP.",
     body: "Build 42 passed smoke tests. Mail client telemetry remains disabled in this MVP.\n\nNext backend cut should replace the mock protocol with live IMAP/SMTP adapters.",
+    html_body: null,
+    inline_resources: [],
     attachments: [],
     flags: { is_read: true, is_starred: false, is_answered: false, is_forwarded: false },
     size_bytes: 3068,
@@ -123,6 +169,8 @@ let messages: MailMessage[] = [
     received_at: now(),
     body_preview: "Confirmation sent directly after compose submit.",
     body: "Confirmation sent directly after compose submit.\n\nThis row exercises non-INBOX folder navigation in the browser demo.",
+    html_body: null,
+    inline_resources: [],
     attachments: [],
     flags: { is_read: true, is_starred: false, is_answered: false, is_forwarded: false },
     size_bytes: 2048,
@@ -141,6 +189,8 @@ let messages: MailMessage[] = [
     received_at: now(),
     body_preview: "Archived reconciliation notes remain searchable outside INBOX.",
     body: "Archived reconciliation notes remain searchable outside INBOX.",
+    html_body: null,
+    inline_resources: [],
     attachments: [],
     flags: { is_read: true, is_starred: false, is_answered: false, is_forwarded: false },
     size_bytes: 2048,
@@ -159,6 +209,8 @@ let messages: MailMessage[] = [
     received_at: now(),
     body_preview: "Draft content is indexed for folder navigation validation.",
     body: "Draft content is indexed for folder navigation validation.",
+    html_body: null,
+    inline_resources: [],
     attachments: [],
     flags: { is_read: true, is_starred: false, is_answered: false, is_forwarded: false },
     size_bytes: 1024,
@@ -177,6 +229,8 @@ let messages: MailMessage[] = [
     received_at: now(),
     body_preview: "Trash folder sync proves delete-to-trash can be inspected.",
     body: "Trash folder sync proves delete-to-trash can be inspected.",
+    html_body: null,
+    inline_resources: [],
     attachments: [],
     flags: { is_read: true, is_starred: false, is_answered: false, is_forwarded: false },
     size_bytes: 1024,
@@ -557,6 +611,8 @@ export const demoBackend = {
             received_at: now(),
             body_preview: bodyPreview.slice(0, 180),
             body: draft.body,
+            html_body: null,
+            inline_resources: [],
             attachments: [],
             flags: { is_read: true, is_starred: false, is_answered: true, is_forwarded: false },
             size_bytes: null,

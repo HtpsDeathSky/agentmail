@@ -1,6 +1,6 @@
 # Next Steps
 
-Last updated: 2026-05-06
+Last updated: 2026-05-08
 
 ## Gmail Internal Testing
 
@@ -29,6 +29,12 @@ Last updated: 2026-05-06
 
 ## High-Priority Product Improvements
 
+- Validate MIME browsing against real provider mailboxes.
+  - Confirm raw MIME is saved for synced IMAP messages.
+  - Open HTML-heavy newsletters and verify sanitized HTML, remote images, and inline CID images render correctly.
+  - Permanently delete a disposable Trash message and confirm local raw MIME is removed.
+  - Acceptance: real messages can be read as HTML without attachment download support, and permanent delete leaves no raw MIME residue for that message.
+
 - Improve send failure visibility.
   - Show SMTP send failures clearly in main status text and the optional activity log.
   - Acceptance: a failed send tells the user whether the failure is address parsing, authentication, connection, TLS, or provider rejection when available.
@@ -44,6 +50,7 @@ Last updated: 2026-05-06
 ## Later MVP Extensions
 
 - Attachment file download and safe local opening.
+- MIME source viewer and `.eml` export using the stored raw MIME.
 - Polish Gmail OAuth loopback callback handling and public verification readiness.
 - Tray/minimize behavior and Windows notifications.
 - Mail rules, labels, templates, contacts, and batch operations.

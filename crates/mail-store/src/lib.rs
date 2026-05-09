@@ -3,9 +3,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use mail_core::{
-    now_rfc3339, ActionAuditStatus, AiInsight, AiSettings, AttachmentRef, FolderRole, MailAccount,
-    MailActionAudit, MailActionKind, MailAuth, MailFolder, MailMessage, MailProvider, MessageFlags,
-    MessageQuery, PendingActionStatus, PendingMailAction, SyncState, SyncStateKind,
+    now_rfc3339, ActionAuditStatus, AiInsight, AiSettings, AttachmentRef, FolderRole,
+    InlineResource, MailAccount, MailActionAudit, MailActionKind, MailAuth, MailFolder,
+    MailMessage, MailProvider, MessageFlags, MessageQuery, PendingActionStatus, PendingMailAction,
+    SyncState, SyncStateKind,
 };
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
@@ -51,6 +52,26 @@ impl MailStore {
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    #[cfg(test)]
+    fn raw_mime_len_for_test(&self, message_id: &str) -> StoreResult<Option<usize>> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT length(raw_mime) FROM message_raw_sources WHERE message_id = ?1",
+            params![message_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map(|value| value.map(|len| len as usize))
+        .map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    fn delete_message_for_test(&self, message_id: &str) -> StoreResult<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM messages WHERE id = ?1", params![message_id])?;
+        Ok(())
     }
 
     pub fn migrate(&self) -> StoreResult<()> {
@@ -107,7 +128,9 @@ impl MailStore {
               received_at TEXT NOT NULL,
               body_preview TEXT NOT NULL,
               body TEXT,
+              html_body TEXT,
               attachments_json TEXT NOT NULL,
+              inline_resources_json TEXT NOT NULL DEFAULT '[]',
               is_read INTEGER NOT NULL,
               is_starred INTEGER NOT NULL,
               is_answered INTEGER NOT NULL,
@@ -123,6 +146,13 @@ impl MailStore {
               ON messages(account_id, folder_id, received_at DESC);
             CREATE INDEX IF NOT EXISTS idx_messages_deleted
               ON messages(deleted_at);
+
+            CREATE TABLE IF NOT EXISTS message_raw_sources (
+              message_id TEXT PRIMARY KEY,
+              raw_mime BLOB NOT NULL,
+              stored_at TEXT NOT NULL,
+              FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+            );
 
             CREATE TABLE IF NOT EXISTS attachments (
               id TEXT PRIMARY KEY,
@@ -269,6 +299,18 @@ impl MailStore {
             "accounts",
             "oauth_expires_at",
             "ALTER TABLE accounts ADD COLUMN oauth_expires_at TEXT",
+        )?;
+        ensure_column(
+            &conn,
+            "messages",
+            "html_body",
+            "ALTER TABLE messages ADD COLUMN html_body TEXT",
+        )?;
+        ensure_column(
+            &conn,
+            "messages",
+            "inline_resources_json",
+            "ALTER TABLE messages ADD COLUMN inline_resources_json TEXT NOT NULL DEFAULT '[]'",
         )?;
         ensure_column(
             &conn,
@@ -509,7 +551,8 @@ impl MailStore {
             r#"
             SELECT id, account_id, folder_id, uid, message_id_header, subject, sender,
                    recipients_json, cc_json, received_at, body_preview, body, attachments_json,
-                   is_read, is_starred, is_answered, is_forwarded, size_bytes, deleted_at
+                   is_read, is_starred, is_answered, is_forwarded, size_bytes, deleted_at,
+                   html_body, inline_resources_json
             FROM messages
             WHERE account_id LIKE ?1
               AND folder_id LIKE ?2
@@ -526,7 +569,7 @@ impl MailStore {
                 query.limit as i64,
                 query.offset as i64,
             ],
-            message_from_row,
+            message_summary_from_row,
         )?;
         collect_rows(rows)
     }
@@ -537,7 +580,8 @@ impl MailStore {
             r#"
             SELECT id, account_id, folder_id, uid, message_id_header, subject, sender,
                    recipients_json, cc_json, received_at, body_preview, body, attachments_json,
-                   is_read, is_starred, is_answered, is_forwarded, size_bytes, deleted_at
+                   is_read, is_starred, is_answered, is_forwarded, size_bytes, deleted_at,
+                   html_body, inline_resources_json
             FROM messages
             WHERE id = ?1
             "#,
@@ -546,6 +590,17 @@ impl MailStore {
         )
         .optional()?
         .ok_or_else(|| StoreError::NotFound(format!("message {id}")))
+    }
+
+    pub fn get_raw_mime_source(&self, message_id: &str) -> StoreResult<Option<Vec<u8>>> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT raw_mime FROM message_raw_sources WHERE message_id = ?1",
+            params![message_id],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn search_messages(&self, term: &str, limit: u32) -> StoreResult<Vec<MailMessage>> {
@@ -564,7 +619,8 @@ impl MailStore {
             SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id_header,
                    m.subject, m.sender, m.recipients_json, m.cc_json, m.received_at,
                    m.body_preview, m.body, m.attachments_json, m.is_read, m.is_starred,
-                   m.is_answered, m.is_forwarded, m.size_bytes, m.deleted_at
+                   m.is_answered, m.is_forwarded, m.size_bytes, m.deleted_at,
+                   m.html_body, m.inline_resources_json
             FROM message_fts
             JOIN messages m ON m.id = message_fts.message_id
             WHERE message_fts MATCH ?1
@@ -573,7 +629,7 @@ impl MailStore {
             LIMIT ?2
             "#,
         )?;
-        let rows = stmt.query_map(params![fts_query, limit as i64], message_from_row)?;
+        let rows = stmt.query_map(params![fts_query, limit as i64], message_summary_from_row)?;
         collect_rows(rows)
     }
 
@@ -710,13 +766,25 @@ impl MailStore {
         let deleted_at = now_rfc3339();
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
-        for id in message_ids {
-            tx.execute(
-                "UPDATE messages SET deleted_at = ?1 WHERE id = ?2",
-                params![deleted_at, id],
-            )?;
-            tx.execute("DELETE FROM message_fts WHERE message_id = ?1", params![id])?;
-        }
+        soft_delete_messages_tx(&tx, message_ids, &deleted_at)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_raw_mime_sources(&self, message_ids: &[String]) -> StoreResult<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        delete_raw_mime_sources_tx(&tx, message_ids)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn soft_delete_messages_and_raw_sources(&self, message_ids: &[String]) -> StoreResult<()> {
+        let deleted_at = now_rfc3339();
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        soft_delete_messages_tx(&tx, message_ids, &deleted_at)?;
+        delete_raw_mime_sources_tx(&tx, message_ids)?;
         tx.commit()?;
         Ok(())
     }
@@ -761,6 +829,7 @@ impl MailStore {
             )?;
             tx.execute("DELETE FROM message_fts WHERE message_id = ?1", params![id])?;
         }
+        delete_raw_mime_sources_tx(&tx, &stale_ids)?;
         tx.commit()?;
         Ok(stale_ids.len())
     }
@@ -1141,10 +1210,36 @@ fn save_pending_action_on_conn(conn: &Connection, action: &PendingMailAction) ->
     Ok(())
 }
 
+fn soft_delete_messages_tx(
+    tx: &Transaction<'_>,
+    message_ids: &[String],
+    deleted_at: &str,
+) -> StoreResult<()> {
+    for id in message_ids {
+        tx.execute(
+            "UPDATE messages SET deleted_at = ?1 WHERE id = ?2",
+            params![deleted_at, id],
+        )?;
+        tx.execute("DELETE FROM message_fts WHERE message_id = ?1", params![id])?;
+    }
+    Ok(())
+}
+
+fn delete_raw_mime_sources_tx(tx: &Transaction<'_>, message_ids: &[String]) -> StoreResult<()> {
+    for id in message_ids {
+        tx.execute(
+            "DELETE FROM message_raw_sources WHERE message_id = ?1",
+            params![id],
+        )?;
+    }
+    Ok(())
+}
+
 fn upsert_message_tx(tx: &Transaction<'_>, message: &MailMessage) -> StoreResult<String> {
     let recipients_json = serde_json::to_string(&message.recipients)?;
     let cc_json = serde_json::to_string(&message.cc)?;
     let attachments_json = serde_json::to_string(&message.attachments)?;
+    let inline_resources_json = serde_json::to_string(&message.inline_resources)?;
     let body_for_fts = message.body.as_deref().unwrap_or(&message.body_preview);
     let recipients_for_fts = message.recipients.join(" ");
 
@@ -1180,6 +1275,22 @@ fn upsert_message_tx(tx: &Transaction<'_>, message: &MailMessage) -> StoreResult
                 )
                 .optional()?;
             if let Some(duplicate_id) = duplicate_id {
+                if message.raw_mime.is_none() {
+                    tx.execute(
+                        r#"
+                        INSERT INTO message_raw_sources (message_id, raw_mime, stored_at)
+                        SELECT ?1, raw_mime, stored_at
+                        FROM message_raw_sources
+                        WHERE message_id = ?2
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM message_raw_sources
+                            WHERE message_id = ?1
+                          )
+                        "#,
+                        params![existing_id, duplicate_id],
+                    )?;
+                }
                 tx.execute(
                     "DELETE FROM message_fts WHERE message_id = ?1",
                     params![duplicate_id],
@@ -1200,13 +1311,15 @@ fn upsert_message_tx(tx: &Transaction<'_>, message: &MailMessage) -> StoreResult
                 received_at=?9,
                 body_preview=?10,
                 body=?11,
-                attachments_json=?12,
-                is_read=?13,
-                is_starred=?14,
-                is_answered=?15,
-                is_forwarded=?16,
-                size_bytes=?17,
-                deleted_at=?18
+                html_body=?12,
+                attachments_json=?13,
+                inline_resources_json=?14,
+                is_read=?15,
+                is_starred=?16,
+                is_answered=?17,
+                is_forwarded=?18,
+                size_bytes=?19,
+                deleted_at=?20
             WHERE id = ?1
             "#,
             params![
@@ -1221,7 +1334,9 @@ fn upsert_message_tx(tx: &Transaction<'_>, message: &MailMessage) -> StoreResult
                 message.received_at,
                 message.body_preview,
                 message.body,
+                message.html_body,
                 attachments_json,
+                inline_resources_json,
                 message.flags.is_read,
                 message.flags.is_starred,
                 message.flags.is_answered,
@@ -1236,10 +1351,11 @@ fn upsert_message_tx(tx: &Transaction<'_>, message: &MailMessage) -> StoreResult
             r#"
             INSERT INTO messages (
               id, account_id, folder_id, uid, message_id_header, subject, sender,
-              recipients_json, cc_json, received_at, body_preview, body, attachments_json,
-              is_read, is_starred, is_answered, is_forwarded, size_bytes, deleted_at
+              recipients_json, cc_json, received_at, body_preview, body, html_body,
+              attachments_json, inline_resources_json, is_read, is_starred, is_answered,
+              is_forwarded, size_bytes, deleted_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
             ON CONFLICT(account_id, folder_id, uid) DO UPDATE SET
               message_id_header=excluded.message_id_header,
               subject=excluded.subject,
@@ -1249,7 +1365,9 @@ fn upsert_message_tx(tx: &Transaction<'_>, message: &MailMessage) -> StoreResult
               received_at=excluded.received_at,
               body_preview=excluded.body_preview,
               body=excluded.body,
+              html_body=excluded.html_body,
               attachments_json=excluded.attachments_json,
+              inline_resources_json=excluded.inline_resources_json,
               is_read=excluded.is_read,
               is_starred=excluded.is_starred,
               is_answered=excluded.is_answered,
@@ -1270,7 +1388,9 @@ fn upsert_message_tx(tx: &Transaction<'_>, message: &MailMessage) -> StoreResult
                 message.received_at,
                 message.body_preview,
                 message.body,
+                message.html_body,
                 attachments_json,
+                inline_resources_json,
                 message.flags.is_read,
                 message.flags.is_starred,
                 message.flags.is_answered,
@@ -1313,6 +1433,18 @@ fn upsert_message_tx(tx: &Transaction<'_>, message: &MailMessage) -> StoreResult
                 body_for_fts,
                 message.body_preview,
             ],
+        )?;
+    }
+    if let Some(raw_mime) = message.raw_mime.as_deref() {
+        tx.execute(
+            r#"
+            INSERT INTO message_raw_sources (message_id, raw_mime, stored_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(message_id) DO UPDATE SET
+              raw_mime=excluded.raw_mime,
+              stored_at=excluded.stored_at
+            "#,
+            params![stored_message_id, raw_mime, now_rfc3339()],
         )?;
     }
     Ok(stored_message_id)
@@ -1547,13 +1679,31 @@ fn folder_from_row(row: &Row<'_>) -> rusqlite::Result<MailFolder> {
 }
 
 fn message_from_row(row: &Row<'_>) -> rusqlite::Result<MailMessage> {
+    message_from_row_with_inline_resources(row, true)
+}
+
+fn message_summary_from_row(row: &Row<'_>) -> rusqlite::Result<MailMessage> {
+    message_from_row_with_inline_resources(row, false)
+}
+
+fn message_from_row_with_inline_resources(
+    row: &Row<'_>,
+    include_inline_resources: bool,
+) -> rusqlite::Result<MailMessage> {
     let recipients_json: String = row.get(7)?;
     let cc_json: String = row.get(8)?;
     let attachments_json: String = row.get(12)?;
+    let html_body: Option<String> = row.get(19)?;
+    let inline_resources_json: String = row.get(20)?;
     let recipients = serde_json::from_str(&recipients_json).unwrap_or_default();
     let cc = serde_json::from_str(&cc_json).unwrap_or_default();
     let attachments =
         serde_json::from_str::<Vec<AttachmentRef>>(&attachments_json).unwrap_or_default();
+    let inline_resources = if include_inline_resources {
+        serde_json::from_str::<Vec<InlineResource>>(&inline_resources_json).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     Ok(MailMessage {
         id: row.get(0)?,
@@ -1568,6 +1718,9 @@ fn message_from_row(row: &Row<'_>) -> rusqlite::Result<MailMessage> {
         received_at: row.get(9)?,
         body_preview: row.get(10)?,
         body: row.get(11)?,
+        html_body,
+        raw_mime: None,
+        inline_resources,
         attachments,
         flags: MessageFlags {
             is_read: row.get(13)?,
@@ -1781,9 +1934,301 @@ fn pending_status_from_str(status: &str) -> PendingActionStatus {
 mod tests {
     use super::*;
     use mail_core::{
-        new_id, AiInsight, AiPriority, AiSettings, FolderRole, MailAccount, MailFolder,
-        MailMessage, MessageFlags,
+        new_id, AiInsight, AiPriority, AiSettings, FolderRole, InlineResource, MailAccount,
+        MailFolder, MailMessage, MessageFlags,
     };
+
+    fn test_account(now: &str) -> MailAccount {
+        MailAccount {
+            id: "acct".to_string(),
+            display_name: "Ops".to_string(),
+            email: "ops@example.com".to_string(),
+            provider: MailProvider::GenericImapSmtp,
+            auth: MailAuth::Password {
+                password: String::new(),
+            },
+            imap_host: "imap.example.com".to_string(),
+            imap_port: 993,
+            imap_tls: true,
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_port: 465,
+            smtp_tls: true,
+            sync_enabled: true,
+            created_at: now.to_string(),
+            updated_at: now.to_string(),
+        }
+    }
+
+    fn test_folder(account_id: &str) -> MailFolder {
+        MailFolder {
+            id: "inbox".to_string(),
+            account_id: account_id.to_string(),
+            name: "INBOX".to_string(),
+            path: "INBOX".to_string(),
+            role: FolderRole::Inbox,
+            unread_count: 0,
+            total_count: 0,
+        }
+    }
+
+    fn test_message(
+        account_id: &str,
+        folder_id: &str,
+        message_id: &str,
+        uid: &str,
+        now: &str,
+    ) -> MailMessage {
+        MailMessage {
+            id: message_id.to_string(),
+            account_id: account_id.to_string(),
+            folder_id: folder_id.to_string(),
+            uid: Some(uid.to_string()),
+            message_id_header: Some(format!("<{message_id}@example.com>")),
+            subject: "Raw MIME".to_string(),
+            sender: "a@example.com".to_string(),
+            recipients: vec!["ops@example.com".to_string()],
+            cc: Vec::new(),
+            received_at: now.to_string(),
+            body_preview: "body".to_string(),
+            body: Some("body".to_string()),
+            html_body: None,
+            raw_mime: None,
+            inline_resources: Vec::new(),
+            attachments: Vec::new(),
+            flags: MessageFlags::default(),
+            size_bytes: None,
+            deleted_at: None,
+        }
+    }
+
+    fn save_raw_mime_fixture() -> (MailStore, MailMessage) {
+        let store = MailStore::memory().unwrap();
+        let now = now_rfc3339();
+        let account = test_account(&now);
+        let folder = test_folder(&account.id);
+        store.save_account(&account).unwrap();
+        store.save_folder(&folder).unwrap();
+
+        let mut message = test_message(&account.id, &folder.id, "message-raw", "42", &now);
+        message.raw_mime = Some(b"From: a@example.com\r\n\r\nbody".to_vec());
+        store.upsert_message(&message).unwrap();
+
+        (store, message)
+    }
+
+    #[test]
+    fn upsert_message_persists_raw_mime_source() {
+        let (store, message) = save_raw_mime_fixture();
+
+        assert_eq!(
+            store.raw_mime_len_for_test(&message.id).unwrap(),
+            Some(b"From: a@example.com\r\n\r\nbody".len())
+        );
+        assert_eq!(store.get_message(&message.id).unwrap().raw_mime, None);
+    }
+
+    #[test]
+    fn message_round_trip_preserves_html_body_and_inline_resources() {
+        let store = MailStore::memory().unwrap();
+        let now = now_rfc3339();
+        let account = test_account(&now);
+        let folder = test_folder(&account.id);
+        store.save_account(&account).unwrap();
+        store.save_folder(&folder).unwrap();
+
+        let mut message = test_message(&account.id, &folder.id, "message-html", "43", &now);
+        message.html_body = Some("<p>Hello <img src=\"cid:logo@example.com\"></p>".to_string());
+        message.inline_resources = vec![InlineResource {
+            id: "inline-1".to_string(),
+            message_id: message.id.clone(),
+            content_id: "logo@example.com".to_string(),
+            filename: Some("logo.png".to_string()),
+            mime_type: "image/png".to_string(),
+            bytes: b"image".to_vec(),
+        }];
+
+        store.upsert_message(&message).unwrap();
+
+        let loaded = store.get_message(&message.id).unwrap();
+        assert_eq!(loaded.html_body, message.html_body);
+        assert_eq!(loaded.inline_resources, message.inline_resources);
+        assert_eq!(loaded.raw_mime, None);
+    }
+
+    #[test]
+    fn list_and_search_messages_omit_inline_resource_bytes() {
+        let store = MailStore::memory().unwrap();
+        let now = now_rfc3339();
+        let account = test_account(&now);
+        let folder = test_folder(&account.id);
+        store.save_account(&account).unwrap();
+        store.save_folder(&folder).unwrap();
+
+        let mut message = test_message(&account.id, &folder.id, "message-html", "43", &now);
+        message.html_body = Some("<p>Hello <img src=\"cid:logo@example.com\"></p>".to_string());
+        message.inline_resources = vec![InlineResource {
+            id: "inline-1".to_string(),
+            message_id: message.id.clone(),
+            content_id: "logo@example.com".to_string(),
+            filename: Some("logo.png".to_string()),
+            mime_type: "image/png".to_string(),
+            bytes: b"image".to_vec(),
+        }];
+        store.upsert_message(&message).unwrap();
+
+        let listed = store
+            .list_messages(&MessageQuery {
+                account_id: Some(account.id.clone()),
+                folder_id: Some(folder.id.clone()),
+                limit: 10,
+                offset: 0,
+            })
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].html_body, message.html_body);
+        assert!(listed[0].inline_resources.is_empty());
+
+        let hits = store.search_messages("Raw MIME", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, message.id);
+        assert!(hits[0].inline_resources.is_empty());
+
+        let loaded = store.get_message(&message.id).unwrap();
+        assert_eq!(loaded.inline_resources, message.inline_resources);
+    }
+
+    #[test]
+    fn raw_mime_survives_metadata_upsert_without_raw_body() {
+        let (store, mut message) = save_raw_mime_fixture();
+        message.subject = "Metadata refresh".to_string();
+        message.raw_mime = None;
+
+        store.upsert_message(&message).unwrap();
+
+        assert_eq!(
+            store.raw_mime_len_for_test(&message.id).unwrap(),
+            Some(b"From: a@example.com\r\n\r\nbody".len())
+        );
+    }
+
+    #[test]
+    fn soft_delete_messages_preserves_raw_mime_source() {
+        let (store, message) = save_raw_mime_fixture();
+
+        store
+            .soft_delete_messages(std::slice::from_ref(&message.id))
+            .unwrap();
+
+        assert_eq!(
+            store.raw_mime_len_for_test(&message.id).unwrap(),
+            Some(b"From: a@example.com\r\n\r\nbody".len())
+        );
+        assert!(store.get_message(&message.id).unwrap().deleted_at.is_some());
+    }
+
+    #[test]
+    fn reconcile_folder_remote_uids_removes_raw_mime_for_absent_remote_message() {
+        let (store, message) = save_raw_mime_fixture();
+
+        store
+            .reconcile_folder_remote_uids(&message.account_id, &message.folder_id, &HashSet::new())
+            .unwrap();
+
+        assert_eq!(store.raw_mime_len_for_test(&message.id).unwrap(), None);
+        assert!(store.get_message(&message.id).unwrap().deleted_at.is_some());
+    }
+
+    #[test]
+    fn soft_delete_messages_and_raw_sources_removes_raw_mime_source() {
+        let (store, message) = save_raw_mime_fixture();
+
+        store
+            .soft_delete_messages_and_raw_sources(std::slice::from_ref(&message.id))
+            .unwrap();
+
+        assert_eq!(store.raw_mime_len_for_test(&message.id).unwrap(), None);
+        assert!(store.get_message(&message.id).unwrap().deleted_at.is_some());
+    }
+
+    #[test]
+    fn deleting_message_removes_raw_mime_source() {
+        let (store, message) = save_raw_mime_fixture();
+
+        store.delete_message_for_test(&message.id).unwrap();
+
+        assert_eq!(store.raw_mime_len_for_test(&message.id).unwrap(), None);
+    }
+
+    #[test]
+    fn duplicate_row_cleanup_removes_duplicate_raw_mime_source() {
+        let store = MailStore::memory().unwrap();
+        let now = now_rfc3339();
+        let account = test_account(&now);
+        let folder = test_folder(&account.id);
+        store.save_account(&account).unwrap();
+        store.save_folder(&folder).unwrap();
+
+        let mut duplicate = test_message(&account.id, &folder.id, "remote-duplicate", "900", &now);
+        duplicate.raw_mime = Some(b"From: dup@example.com\r\n\r\nduplicate".to_vec());
+        let mut placeholder = duplicate.clone();
+        placeholder.id = "local-placeholder".to_string();
+        placeholder.uid = None;
+        placeholder.raw_mime = None;
+        let mut incoming = duplicate.clone();
+        incoming.id = "incoming-remote".to_string();
+        incoming.raw_mime = Some(b"From: incoming@example.com\r\n\r\nincoming".to_vec());
+
+        store.upsert_message(&duplicate).unwrap();
+        store.upsert_message(&placeholder).unwrap();
+        assert_eq!(
+            store.raw_mime_len_for_test(&duplicate.id).unwrap(),
+            Some(b"From: dup@example.com\r\n\r\nduplicate".len())
+        );
+
+        store.upsert_message(&incoming).unwrap();
+
+        assert_eq!(store.raw_mime_len_for_test(&duplicate.id).unwrap(), None);
+        assert_eq!(
+            store.raw_mime_len_for_test(&placeholder.id).unwrap(),
+            Some(b"From: incoming@example.com\r\n\r\nincoming".len())
+        );
+    }
+
+    #[test]
+    fn duplicate_row_cleanup_preserves_duplicate_raw_mime_when_incoming_has_none() {
+        let store = MailStore::memory().unwrap();
+        let now = now_rfc3339();
+        let account = test_account(&now);
+        let folder = test_folder(&account.id);
+        store.save_account(&account).unwrap();
+        store.save_folder(&folder).unwrap();
+
+        let duplicate_raw = b"From: dup@example.com\r\n\r\nduplicate".to_vec();
+        let mut duplicate = test_message(&account.id, &folder.id, "remote-duplicate", "900", &now);
+        duplicate.raw_mime = Some(duplicate_raw.clone());
+        let mut placeholder = duplicate.clone();
+        placeholder.id = "local-placeholder".to_string();
+        placeholder.uid = None;
+        placeholder.raw_mime = None;
+        let mut incoming = duplicate.clone();
+        incoming.id = "incoming-remote".to_string();
+        incoming.raw_mime = None;
+
+        store.upsert_message(&duplicate).unwrap();
+        store.upsert_message(&placeholder).unwrap();
+
+        store.upsert_message(&incoming).unwrap();
+
+        assert_eq!(store.raw_mime_len_for_test(&duplicate.id).unwrap(), None);
+        assert_eq!(
+            store.raw_mime_len_for_test(&placeholder.id).unwrap(),
+            Some(duplicate_raw.len())
+        );
+        assert_eq!(
+            store.get_raw_mime_source(&placeholder.id).unwrap(),
+            Some(duplicate_raw)
+        );
+    }
 
     #[test]
     fn stores_and_searches_messages() {
@@ -1832,6 +2277,9 @@ mod tests {
                 received_at: now,
                 body_preview: "Firewall drift and backup coverage".to_string(),
                 body: Some("Firewall drift requires review".to_string()),
+                html_body: None,
+                raw_mime: None,
+                inline_resources: Vec::new(),
                 attachments: vec![],
                 flags: MessageFlags::default(),
                 size_bytes: Some(2048),
@@ -1891,6 +2339,9 @@ mod tests {
             received_at: now.clone(),
             body_preview: "old local body".to_string(),
             body: Some("old local body".to_string()),
+            html_body: None,
+            raw_mime: None,
+            inline_resources: Vec::new(),
             attachments: Vec::new(),
             flags: MessageFlags::default(),
             size_bytes: Some(100),
@@ -1990,6 +2441,9 @@ mod tests {
             received_at: now.clone(),
             body_preview: "local body".to_string(),
             body: Some("local body".to_string()),
+            html_body: None,
+            raw_mime: None,
+            inline_resources: Vec::new(),
             attachments: Vec::new(),
             flags: MessageFlags {
                 is_read: true,
@@ -2484,6 +2938,9 @@ mod tests {
             received_at: now.clone(),
             body_preview: "Direct body".to_string(),
             body: Some("Direct body".to_string()),
+            html_body: None,
+            raw_mime: None,
+            inline_resources: Vec::new(),
             attachments: Vec::new(),
             flags: MessageFlags {
                 is_read: true,
@@ -2605,6 +3062,9 @@ mod tests {
                 received_at: now.clone(),
                 body_preview: "Firewall drift and backup coverage".to_string(),
                 body: Some("Firewall drift requires review".to_string()),
+                html_body: None,
+                raw_mime: None,
+                inline_resources: Vec::new(),
                 attachments: vec![],
                 flags: MessageFlags::default(),
                 size_bytes: Some(2048),
@@ -2708,6 +3168,9 @@ mod tests {
                 received_at: now.clone(),
                 body_preview: "Firewall drift and backup coverage".to_string(),
                 body: Some("Firewall drift requires review".to_string()),
+                html_body: None,
+                raw_mime: None,
+                inline_resources: Vec::new(),
                 attachments: vec![],
                 flags: MessageFlags::default(),
                 size_bytes: Some(2048),

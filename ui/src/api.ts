@@ -46,6 +46,15 @@ export interface AttachmentRef {
   local_path?: string | null;
 }
 
+export interface InlineResource {
+  id: string;
+  message_id: string;
+  content_id: string;
+  filename?: string | null;
+  mime_type: string;
+  bytes: number[];
+}
+
 export interface MailMessage {
   id: string;
   account_id: string;
@@ -59,6 +68,8 @@ export interface MailMessage {
   received_at: Timestamp;
   body_preview: string;
   body?: string | null;
+  html_body: string | null;
+  inline_resources: InlineResource[];
   attachments: AttachmentRef[];
   flags: MessageFlags;
   size_bytes?: number | null;
