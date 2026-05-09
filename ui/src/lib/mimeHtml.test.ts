@@ -74,16 +74,111 @@ describe("buildRenderableHtml", () => {
     expect(document.querySelector("img")?.getAttribute("src")).toBe("data:image/png;base64,aW1hZ2UtYnl0ZXM=");
   });
 
-  it("removes style elements and strips inline style attributes", () => {
+  it("keeps safe CSS while removing dangerous style content", () => {
     const rendered = buildRenderableHtml(
-      '<style>@import url("https://tracker.example.com/mail.css");</style><p style="background-image:url(https://tracker.example.com/pixel)">body</p>',
+      `
+        <html>
+          <head>
+            <style>
+              @import url("https://tracker.example.com/mail.css");
+              .mail { color: #111; padding: 12px; background-image: url("https://cdn.example.com/bg.png"); }
+              .bad-js { background-image: url("javascript:alert(1)"); }
+              .bad-vbs { background-image: url(vbscript:msgbox(1)); }
+              .bad-expression { width: expression(alert(1)); }
+              .bad-binding { -moz-binding: url("https://evil.example.com/xss.xml#xss"); }
+              .bad-behavior { behavior: url("https://evil.example.com/ie.htc"); }
+              @media screen and (max-width: 640px) { .mail { width: 100%; } }
+            </style>
+          </head>
+          <body>
+            <p class="mail" style="background: #fff url(https://cdn.example.com/card.png); color: #222; padding: 16px; width: 600px; background-image: url(javascript:alert(2)); behavior: url(https://evil.example.com/ie.htc);">body</p>
+          </body>
+        </html>
+      `,
       []
     );
     const document = new DOMParser().parseFromString(rendered, "text/html");
+    const styleText = document.querySelector("style")?.textContent ?? "";
+    const inlineStyle = document.querySelector("p")?.getAttribute("style") ?? "";
 
-    expect(document.querySelector("style")).toBeNull();
-    expect(document.querySelector("p")?.hasAttribute("style")).toBe(false);
+    expect(document.querySelector("style")).not.toBeNull();
+    expect(styleText).toContain(".mail");
+    expect(styleText).toContain("color: #111;");
+    expect(styleText).toContain("padding: 12px;");
+    expect(styleText).toContain('background-image: url("https://cdn.example.com/bg.png");');
+    expect(styleText).toContain("@media screen and (max-width: 640px)");
+    expect(styleText).toContain("width: 100%;");
+    expect(styleText).not.toContain("@import");
+    expect(styleText).not.toContain("javascript:");
+    expect(styleText).not.toContain("vbscript:");
+    expect(styleText).not.toContain("expression");
+    expect(styleText).not.toContain("-moz-binding");
+    expect(styleText).not.toContain("behavior");
+    expect(inlineStyle).toContain("background: #fff url(https://cdn.example.com/card.png);");
+    expect(inlineStyle).toContain("color: #222;");
+    expect(inlineStyle).toContain("padding: 16px;");
+    expect(inlineStyle).toContain("width: 600px;");
+    expect(inlineStyle).not.toContain("javascript:");
+    expect(inlineStyle).not.toContain("behavior");
     expect(document.body.textContent).toContain("body");
+  });
+
+  it("includes sanitized head style rules in the renderable HTML", () => {
+    const rendered = buildRenderableHtml(
+      `
+        <html>
+          <head>
+            <style>.mail-shell { max-width: 720px; margin: 0 auto; }</style>
+          </head>
+          <body><div class="mail-shell">body</div></body>
+        </html>
+      `,
+      []
+    );
+
+    expect(rendered.trim().startsWith("<style>")).toBe(true);
+
+    const document = new DOMParser().parseFromString(rendered, "text/html");
+    expect(document.querySelector("style")?.textContent).toContain(".mail-shell");
+    expect(document.querySelector(".mail-shell")?.textContent).toBe("body");
+  });
+
+  it("preserves safe body attributes on the renderable wrapper", () => {
+    const rendered = buildRenderableHtml(
+      `
+        <html>
+          <head><style>.body .card { width: 640px; }</style></head>
+          <body class="body" style="background-color: #fff; color: #111;" onclick="alert(1)">
+            <div class="card">body</div>
+          </body>
+        </html>
+      `,
+      []
+    );
+    const document = new DOMParser().parseFromString(rendered, "text/html");
+    const wrapper = document.querySelector("body > div.body");
+
+    expect(wrapper).not.toBeNull();
+    expect(wrapper?.getAttribute("style")).toContain("background-color: #fff;");
+    expect(wrapper?.getAttribute("style")).toContain("color: #111;");
+    expect(wrapper?.hasAttribute("onclick")).toBe(false);
+    expect(document.querySelector(".card")?.textContent?.trim()).toBe("body");
+  });
+
+  it("keeps safe inline layout styles and background attributes", () => {
+    const rendered = buildRenderableHtml(
+      '<table background="images/panel.png" style="background-color: #f7f7f7; color: #222; padding: 24px; width: 640px;"><tbody><tr><td>body</td></tr></tbody></table>',
+      []
+    );
+    const document = new DOMParser().parseFromString(rendered, "text/html");
+    const table = document.querySelector("table");
+    const inlineStyle = table?.getAttribute("style") ?? "";
+
+    expect(table?.getAttribute("background")).toBe("images/panel.png");
+    expect(inlineStyle).toContain("background-color: #f7f7f7;");
+    expect(inlineStyle).toContain("color: #222;");
+    expect(inlineStyle).toContain("padding: 24px;");
+    expect(inlineStyle).toContain("width: 640px;");
   });
 
   it("removes inline SVG and namespaced href attributes inside it", () => {
