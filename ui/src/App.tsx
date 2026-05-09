@@ -25,6 +25,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   CSSProperties,
   FormEvent,
+  SyntheticEvent,
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
   useCallback,
@@ -212,6 +213,88 @@ function splitMailbox(value: string) {
     name: match[1].trim() || email,
     email
   };
+}
+
+function HtmlMailFrame({ html }: { html: string }) {
+  const [height, setHeight] = useState(360);
+
+  const resizeFrameElement = useCallback((frame: HTMLIFrameElement) => {
+    const body = frame.contentDocument?.body;
+    const nextHeight = Math.max(body?.scrollHeight ?? 0, body?.offsetHeight ?? 0, 260);
+    setHeight(Math.min(nextHeight, 16000));
+  }, []);
+
+  const document = useMemo(
+    () => `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <base target="_blank">
+    <style>
+      html {
+        margin: 0;
+        padding: 0;
+        background: #fff;
+        color: #111;
+        color-scheme: light;
+      }
+
+      body {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 16px;
+        overflow-wrap: anywhere;
+        background: #fff;
+        color: #111;
+        font: 14px/1.5 Arial, Helvetica, sans-serif;
+      }
+
+      *, *::before, *::after {
+        box-sizing: border-box;
+      }
+
+      img {
+        max-width: 100%;
+        height: auto;
+      }
+
+      table {
+        max-width: 100%;
+      }
+
+      pre {
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>${html}</body>
+</html>`,
+    [html]
+  );
+
+  const resizeFrame = useCallback((event: SyntheticEvent<HTMLIFrameElement>) => {
+    const frame = event.currentTarget;
+    for (const image of Array.from(frame.contentDocument?.images ?? [])) {
+      image.addEventListener("load", () => resizeFrameElement(frame), { once: true });
+      image.addEventListener("error", () => resizeFrameElement(frame), { once: true });
+    }
+    resizeFrameElement(frame);
+    window.setTimeout(() => resizeFrameElement(frame), 250);
+    window.setTimeout(() => resizeFrameElement(frame), 1000);
+    window.setTimeout(() => resizeFrameElement(frame), 2500);
+  }, [resizeFrameElement]);
+
+  return (
+    <iframe
+      className="body-html-frame"
+      sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+      srcDoc={document}
+      style={{ height }}
+      title="HTML message body"
+      onLoad={resizeFrame}
+    />
+  );
 }
 
 export function App() {
@@ -1099,7 +1182,9 @@ export function App() {
                       </div>
                     </div>
                     {selectedRenderableHtml ? (
-                      <div className="body-html-block" dangerouslySetInnerHTML={{ __html: selectedRenderableHtml }} />
+                      <div className="body-html-block">
+                        <HtmlMailFrame html={selectedRenderableHtml} />
+                      </div>
                     ) : (
                       <pre className="body-block">{selectedMessage.body ?? selectedMessage.body_preview}</pre>
                     )}

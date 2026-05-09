@@ -757,10 +757,9 @@ fn parse_message(
     let recipients = address_list(parsed.to());
     let cc = address_list(parsed.cc());
     let html_body = parsed.body_html(0).map(|value| value.into_owned());
+    let text_body = first_text_body(&parsed);
     let body = normalize_text(
-        &parsed
-            .body_text(0)
-            .map(|value| value.into_owned())
+        &text_body
             .or_else(|| html_body.as_ref().map(|value| html_to_text(value)))
             .unwrap_or_default(),
     );
@@ -855,6 +854,40 @@ fn part_mime_type(part: &mail_parser::MessagePart<'_>) -> String {
             )
         })
         .unwrap_or_else(|| "application/octet-stream".to_string())
+}
+
+fn first_text_body(parsed: &mail_parser::Message<'_>) -> Option<String> {
+    parsed
+        .text_body
+        .iter()
+        .filter_map(|part_id| parsed.parts.get(*part_id as usize))
+        .find_map(|part| match &part.body {
+            PartType::Text(text) => Some(text.as_ref().to_string()),
+            _ => None,
+        })
+        .or_else(|| {
+            parsed
+                .parts
+                .iter()
+                .filter(|part| is_fallback_text_body_part(part))
+                .find_map(|part| match &part.body {
+                    PartType::Text(text) => Some(text.as_ref().to_string()),
+                    _ => None,
+                })
+        })
+}
+
+fn is_fallback_text_body_part(part: &mail_parser::MessagePart<'_>) -> bool {
+    !part
+        .content_disposition()
+        .is_some_and(|value| value.is_attachment())
+        && part.attachment_name().is_none()
+        && part.content_type().is_some_and(|content_type| {
+            content_type.ctype().eq_ignore_ascii_case("text")
+                && content_type
+                    .subtype()
+                    .is_some_and(|subtype| subtype.eq_ignore_ascii_case("plain"))
+        })
 }
 
 fn normalize_content_id(value: &str) -> Option<String> {
@@ -960,54 +993,188 @@ fn address_text(value: &Address<'_>) -> Option<String> {
 
 fn build_preview(body: &str) -> String {
     let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if is_noise_preview_text(&compact) {
+        return String::new();
+    }
     compact.chars().take(240).collect()
 }
 
 fn html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    let mut entity = String::new();
-    let mut in_entity = false;
+    let mut index = 0;
 
-    for ch in html.chars() {
-        if in_entity {
-            if ch == ';' {
-                out.push_str(match entity.as_str() {
-                    "nbsp" => " ",
-                    "amp" => "&",
-                    "lt" => "<",
-                    "gt" => ">",
-                    "quot" => "\"",
-                    "apos" => "'",
-                    _ => "",
-                });
-                entity.clear();
-                in_entity = false;
-            } else if entity.len() < 12 {
-                entity.push(ch);
-            } else {
-                entity.clear();
-                in_entity = false;
-            }
+    while index < html.len() {
+        let remaining = &html[index..];
+
+        if remaining.starts_with("<!--") {
+            out.push(' ');
+            index += remaining
+                .find("-->")
+                .map(|end| end + 3)
+                .unwrap_or(remaining.len());
             continue;
         }
 
-        match ch {
-            '<' => {
-                in_tag = true;
+        if remaining.starts_with('<') {
+            if remaining.starts_with("<!") || remaining.starts_with("<?") {
                 out.push(' ');
+                index += remaining
+                    .find('>')
+                    .map(|end| end + 1)
+                    .unwrap_or(remaining.len());
+                continue;
             }
-            '>' => in_tag = false,
-            '&' if !in_tag => {
-                entity.clear();
-                in_entity = true;
+
+            if let Some(tag) = parse_html_tag(remaining) {
+                out.push(' ');
+                if !tag.is_closing && !tag.is_self_closing && is_html_raw_text_tag(tag.name) {
+                    index +=
+                        find_html_closing_tag_end(remaining, tag.name).unwrap_or(remaining.len());
+                } else {
+                    if !tag.is_closing && inserts_text_break(tag.name) {
+                        out.push(' ');
+                    }
+                    index += tag.end_index;
+                }
+                continue;
             }
-            _ if !in_tag => out.push(ch),
-            _ => {}
         }
+
+        if let Some((decoded, consumed)) = decode_html_entity(remaining) {
+            out.push_str(decoded);
+            index += consumed;
+            continue;
+        }
+
+        let ch = remaining
+            .chars()
+            .next()
+            .expect("index is within string bounds");
+        out.push(ch);
+        index += ch.len_utf8();
     }
 
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    normalize_text(&out)
+}
+
+struct HtmlTag<'a> {
+    name: &'a str,
+    is_closing: bool,
+    is_self_closing: bool,
+    end_index: usize,
+}
+
+fn parse_html_tag(input: &str) -> Option<HtmlTag<'_>> {
+    if !input.starts_with('<') {
+        return None;
+    }
+    let end_index = input.find('>')? + 1;
+    let mut inner = input[1..end_index - 1].trim_start();
+    let is_closing = inner.starts_with('/');
+    if is_closing {
+        inner = inner[1..].trim_start();
+    }
+
+    let name_end = inner
+        .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == ':'))
+        .unwrap_or(inner.len());
+    let name = &inner[..name_end];
+    if name.is_empty() || !name.as_bytes()[0].is_ascii_alphabetic() {
+        return None;
+    }
+
+    Some(HtmlTag {
+        name,
+        is_closing,
+        is_self_closing: inner.trim_end().ends_with('/'),
+        end_index,
+    })
+}
+
+fn find_html_closing_tag_end(html: &str, tag: &str) -> Option<usize> {
+    let close_needle = format!("</{tag}");
+    let mut search_start = 0;
+
+    while search_start < html.len() {
+        let relative_index = find_ascii_case_insensitive(&html[search_start..], &close_needle)?;
+        let close_index = search_start + relative_index;
+        if let Some(close_tag) = parse_html_tag(&html[close_index..]) {
+            if close_tag.is_closing && close_tag.name.eq_ignore_ascii_case(tag) {
+                return Some(close_index + close_tag.end_index);
+            }
+        }
+        search_start = close_index + close_needle.len();
+    }
+
+    None
+}
+
+fn is_html_raw_text_tag(name: &str) -> bool {
+    name.eq_ignore_ascii_case("script") || name.eq_ignore_ascii_case("style")
+}
+
+fn inserts_text_break(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "address"
+            | "article"
+            | "aside"
+            | "blockquote"
+            | "br"
+            | "dd"
+            | "div"
+            | "dl"
+            | "dt"
+            | "figcaption"
+            | "figure"
+            | "footer"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "header"
+            | "hr"
+            | "li"
+            | "main"
+            | "nav"
+            | "ol"
+            | "p"
+            | "pre"
+            | "section"
+            | "table"
+            | "td"
+            | "th"
+            | "tr"
+            | "ul"
+    )
+}
+
+fn decode_html_entity(input: &str) -> Option<(&'static str, usize)> {
+    let rest = input.strip_prefix('&')?;
+    let semicolon_index = rest.find(';')?;
+    if semicolon_index > 12 {
+        return None;
+    }
+
+    let decoded = match &rest[..semicolon_index] {
+        "nbsp" => " ",
+        "amp" => "&",
+        "lt" => "<",
+        "gt" => ">",
+        "quot" => "\"",
+        "apos" => "'",
+        _ => "",
+    };
+
+    Some((decoded, semicolon_index + 2))
+}
+
+fn is_noise_preview_text(value: &str) -> bool {
+    value
+        .trim_matches(|ch: char| !ch.is_alphanumeric())
+        .eq_ignore_ascii_case("undefined")
 }
 
 fn normalize_text(value: &str) -> String {
@@ -1243,5 +1410,149 @@ mod tests {
         assert!(body.contains("Report Ready"));
         assert!(body.contains("A&B"));
         assert!(parsed.body_preview.contains("Report Ready"));
+    }
+
+    #[test]
+    fn parses_css_heavy_html_without_leaking_css_into_preview() {
+        let account = test_account();
+        let folder = test_folder(&account);
+        let raw = b"From: promo@example.com\r\nTo: ops@example.com\r\nSubject: Promo\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><head><style>@media only screen and (max-width:480px){table{font-family:Arial;width:100%}}</style></head><body><p>Deal ready</p><script>undefined</script></body></html>\r\n";
+
+        let parsed = parse_message(&account, &folder, 44, raw, None).unwrap();
+
+        assert_eq!(parsed.body.as_deref(), Some("Deal ready"));
+        assert_eq!(parsed.body_preview, "Deal ready");
+        assert!(!parsed.body_preview.contains("@media"));
+        assert!(!parsed.body_preview.contains("undefined"));
+    }
+
+    #[test]
+    fn parses_html_void_and_prefix_tags_without_dropping_body() {
+        let account = test_account();
+        let folder = test_folder(&account);
+        let raw = b"From: promo@example.com\r\nTo: ops@example.com\r\nSubject: Header prefix\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><head><meta charset=\"utf-8\"><link rel=\"stylesheet\" href=\"https://cdn.example.com/mail.css\"></head><body><header>Top banner</header><p>Readable body</p></body></html>\r\n";
+
+        let parsed = parse_message(&account, &folder, 45, raw, None).unwrap();
+
+        assert_eq!(parsed.body.as_deref(), Some("Top banner Readable body"));
+        assert_eq!(parsed.body_preview, "Top banner Readable body");
+    }
+
+    #[test]
+    fn html_to_text_strips_unclosed_raw_text_tags_without_dropping_prior_text() {
+        assert_eq!(
+            html_to_text("<p>Before</p><style>@media only screen { .x { font-family: Arial; }"),
+            "Before"
+        );
+    }
+
+    #[test]
+    fn keeps_plain_text_css_examples_in_preview() {
+        let account = test_account();
+        let folder = test_folder(&account);
+        let raw = b"From: dev@example.com\r\nTo: ops@example.com\r\nSubject: CSS example\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nPlease review this CSS: @media only screen { .card { width: 320px; font-family: Arial; } }\r\n";
+
+        let parsed = parse_message(&account, &folder, 47, raw, None).unwrap();
+
+        assert!(parsed.body_preview.contains("@media only screen"));
+        assert!(parsed.body_preview.contains("font-family"));
+    }
+
+    #[test]
+    fn keeps_undefined_token_in_full_plain_text_body() {
+        let account = test_account();
+        let folder = test_folder(&account);
+        let raw = b"From: dev@example.com\r\nTo: ops@example.com\r\nSubject: Undefined example\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nThe value is undefined in this payload.\r\n";
+
+        let parsed = parse_message(&account, &folder, 48, raw, None).unwrap();
+
+        assert_eq!(
+            parsed.body.as_deref(),
+            Some("The value is undefined in this payload.")
+        );
+        assert_eq!(
+            parsed.body_preview,
+            "The value is undefined in this payload."
+        );
+    }
+
+    #[test]
+    fn keeps_undefined_token_in_html_only_body() {
+        let account = test_account();
+        let folder = test_folder(&account);
+        let raw = b"From: dev@example.com\r\nTo: ops@example.com\r\nSubject: HTML undefined example\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><p>The value is undefined in this payload.</p></body></html>\r\n";
+
+        let parsed = parse_message(&account, &folder, 52, raw, None).unwrap();
+
+        assert_eq!(
+            parsed.body.as_deref(),
+            Some("The value is undefined in this payload.")
+        );
+        assert_eq!(
+            parsed.body_preview,
+            "The value is undefined in this payload."
+        );
+    }
+
+    #[test]
+    fn clears_preview_when_body_is_only_undefined() {
+        let account = test_account();
+        let folder = test_folder(&account);
+        let raw = b"From: dev@example.com\r\nTo: ops@example.com\r\nSubject: Undefined placeholder\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nundefined\r\n";
+
+        let parsed = parse_message(&account, &folder, 53, raw, None).unwrap();
+
+        assert_eq!(parsed.body.as_deref(), Some("undefined"));
+        assert_eq!(parsed.body_preview, "");
+    }
+
+    #[test]
+    fn prefers_later_real_text_part_over_html_text_fallback() {
+        let account = test_account();
+        let folder = test_folder(&account);
+        let raw = b"From: dev@example.com\r\nTo: ops@example.com\r\nSubject: Mixed related\r\nMIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=rel\r\n\r\n--rel\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><p>HTML fallback</p></body></html>\r\n--rel\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nReal plain body\r\n--rel--\r\n";
+
+        let parsed = parse_message(&account, &folder, 49, raw, None).unwrap();
+
+        assert_eq!(parsed.body.as_deref(), Some("Real plain body"));
+        assert_eq!(parsed.body_preview, "Real plain body");
+    }
+
+    #[test]
+    fn ignores_inline_non_plain_text_parts_when_falling_back_to_html() {
+        let account = test_account();
+        let folder = test_folder(&account);
+        let raw = b"From: dev@example.com\r\nTo: ops@example.com\r\nSubject: Related invite\r\nMIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=rel\r\n\r\n--rel\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><p>HTML summary</p></body></html>\r\n--rel\r\nContent-Type: text/calendar; charset=utf-8\r\nContent-Disposition: inline\r\n\r\nBEGIN:VCALENDAR\r\nSUMMARY:Calendar should not be body\r\nEND:VCALENDAR\r\n--rel\r\nContent-Type: text/css; charset=utf-8\r\nContent-Disposition: inline\r\n\r\n.invite { font-family: Arial; }\r\n--rel--\r\n";
+
+        let parsed = parse_message(&account, &folder, 54, raw, None).unwrap();
+
+        assert_eq!(parsed.body.as_deref(), Some("HTML summary"));
+        assert_eq!(parsed.body_preview, "HTML summary");
+        assert!(!parsed.body_preview.contains("VCALENDAR"));
+        assert!(!parsed.body_preview.contains("font-family"));
+    }
+
+    #[test]
+    fn does_not_use_text_attachment_as_message_body() {
+        let account = test_account();
+        let folder = test_folder(&account);
+        let raw = b"From: dev@example.com\r\nTo: ops@example.com\r\nSubject: Attachment only\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=mix\r\n\r\n--mix\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><p>HTML body</p></body></html>\r\n--mix\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Disposition: attachment; filename=\"note.txt\"\r\n\r\nAttachment text\r\n--mix--\r\n";
+
+        let parsed = parse_message(&account, &folder, 50, raw, None).unwrap();
+
+        assert_eq!(parsed.body.as_deref(), Some("HTML body"));
+        assert_eq!(parsed.body_preview, "HTML body");
+    }
+
+    #[test]
+    fn does_not_use_named_text_part_as_message_body() {
+        let account = test_account();
+        let folder = test_folder(&account);
+        let raw = b"From: dev@example.com\r\nTo: ops@example.com\r\nSubject: Named text attachment\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=mix\r\n\r\n--mix\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><p>HTML body</p></body></html>\r\n--mix\r\nContent-Type: text/plain; charset=utf-8; name=\"note.txt\"\r\n\r\nAttachment text\r\n--mix--\r\n";
+
+        let parsed = parse_message(&account, &folder, 51, raw, None).unwrap();
+
+        assert_eq!(parsed.body.as_deref(), Some("HTML body"));
+        assert_eq!(parsed.body_preview, "HTML body");
     }
 }

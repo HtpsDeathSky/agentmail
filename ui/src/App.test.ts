@@ -137,7 +137,12 @@ describe("message detail rendering", () => {
       });
 
       const htmlBlock = await findSelector(app.container, ".body-html-block");
-      expect(queryText(htmlBlock, "HTML Body")).not.toBeNull();
+      const htmlFrame = htmlBlock.querySelector<HTMLIFrameElement>(".body-html-frame");
+      expect(htmlFrame).not.toBeNull();
+      expect(htmlFrame?.getAttribute("sandbox")).toContain("allow-popups");
+      expect(htmlFrame?.getAttribute("sandbox")).toContain("allow-same-origin");
+      expect(htmlFrame?.getAttribute("sandbox")).not.toContain("allow-scripts");
+      expect(htmlFrame?.srcdoc).toContain("HTML Body");
       expect(app.container.querySelector(".metadata-grid")).toBeNull();
       expect(await findText(app.container, "Sender")).not.toBeNull();
       expect(await findText(app.container, "sender@example.com")).not.toBeNull();

@@ -737,6 +737,9 @@ select {
 }
 
 .message-envelope {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: grid;
   gap: 12px;
   margin: 18px 0 16px;
@@ -744,6 +747,7 @@ select {
   padding: 13px 14px;
   border-block: 1px solid var(--color-border);
   background: var(--color-surface-muted);
+  box-shadow: 0 1px 0 var(--color-border);
   overflow-wrap: anywhere;
 }
 
@@ -869,42 +873,19 @@ select {
 .body-html-block {
   min-width: 0;
   min-height: 220px;
-  padding: 16px;
+  padding: 0;
   border: 1px solid var(--color-border);
   border-radius: 4px;
-  background: var(--color-input-bg);
-  color: var(--color-text-soft-3);
-  overflow-wrap: anywhere;
-  font-size: 14px;
-  line-height: 1.55;
+  background: #fff;
+  overflow: hidden;
 }
 
-.body-html-block :first-child {
-  margin-top: 0;
-}
-
-.body-html-block :last-child {
-  margin-bottom: 0;
-}
-
-.body-html-block img {
-  max-width: 100%;
-  height: auto;
-  border-radius: 3px;
-}
-
-.body-html-block a {
-  color: var(--color-warning-bright);
-}
-
-.body-html-block table {
-  max-width: 100%;
-  border-collapse: collapse;
-}
-
-.body-html-block td,
-.body-html-block th {
-  overflow-wrap: anywhere;
+.body-html-frame {
+  display: block;
+  width: 100%;
+  min-height: 260px;
+  border: 0;
+  background: #fff;
 }
 
 .attachment-strip {
