@@ -18,16 +18,46 @@ const BLOCKED_ELEMENTS = new Set([
 
 const CID_PREFIX = "cid:";
 const BLOCKED_URL_ATTRIBUTES = new Set(["action", "background", "cite", "formaction", "poster"]);
-const BLOCKED_CSS_PROPERTIES = new Set(["behavior", "-moz-binding"]);
+const BLOCKED_CSS_PROPERTIES = new Set(["behavior", "-moz-binding", "src"]);
+const CSS_URL_IMAGE_PROPERTIES = new Set(["background", "background-image"]);
 
-export function buildRenderableHtml(html: string, inlineResources: InlineResource[]): string {
+export interface RenderableHtmlAttribute {
+  name: string;
+  value: string;
+}
+
+export interface RenderableMailHtml {
+  headStyles: string;
+  bodyAttributes: RenderableHtmlAttribute[];
+  bodyHtml: string;
+}
+
+export function buildRenderableMailHtml(html: string, inlineResources: InlineResource[]): RenderableMailHtml {
   const document = new DOMParser().parseFromString(html, "text/html");
   const cidResources = buildCidResourceMap(inlineResources);
 
   replaceCidSources(document, cidResources);
   sanitizeDocument(document);
 
-  return `${serializeHeadStyles(document)}${serializeBodyContent(document)}`;
+  return {
+    headStyles: serializeHeadStyles(document),
+    bodyAttributes: serializeBodyAttributes(document),
+    bodyHtml: document.body.innerHTML
+  };
+}
+
+export function buildRenderableHtml(html: string, inlineResources: InlineResource[]): string {
+  const renderable = buildRenderableMailHtml(html, inlineResources);
+  return `${renderable.headStyles}${serializeBodyContent(renderable)}`;
+}
+
+export function serializeHtmlAttributes(attributes: RenderableHtmlAttribute[]) {
+  const serialized = attributes
+    .filter((attribute) => isSafeHtmlAttributeName(attribute.name))
+    .map((attribute) => `${attribute.name}="${escapeHtmlAttribute(attribute.value)}"`)
+    .join(" ");
+
+  return serialized ? ` ${serialized}` : "";
 }
 
 function buildCidResourceMap(inlineResources: InlineResource[]) {
@@ -129,17 +159,16 @@ function serializeHeadStyles(document: Document) {
     .join("");
 }
 
-function serializeBodyContent(document: Document) {
-  const bodyAttributes = Array.from(document.body.attributes);
-  if (bodyAttributes.length === 0) return document.body.innerHTML;
+function serializeBodyAttributes(document: Document): RenderableHtmlAttribute[] {
+  return Array.from(document.body.attributes).map((attribute) => ({
+    name: attribute.name,
+    value: attribute.value
+  }));
+}
 
-  const wrapper = document.createElement("div");
-  for (const attribute of bodyAttributes) {
-    wrapper.setAttribute(attribute.name, attribute.value);
-  }
-  wrapper.innerHTML = document.body.innerHTML;
-
-  return wrapper.outerHTML;
+function serializeBodyContent(renderable: RenderableMailHtml) {
+  if (renderable.bodyAttributes.length === 0) return renderable.bodyHtml;
+  return `<div${serializeHtmlAttributes(renderable.bodyAttributes)}>${renderable.bodyHtml}</div>`;
 }
 
 function sanitizeStyleElement(element: HTMLElement) {
@@ -195,7 +224,15 @@ function sanitizeStyleDeclarations(css: string) {
 
     const property = declaration.slice(0, colonIndex).trim();
     const value = declaration.slice(colonIndex + 1).trim();
-    if (!property || !value || !isSafeCssProperty(property) || !isSafeCssValue(value)) continue;
+    const normalizedProperty = normalizeCssPropertyName(property);
+    if (
+      !property ||
+      !value ||
+      !isSafeCssProperty(normalizedProperty) ||
+      !isSafeCssDeclarationValue(normalizedProperty, value)
+    ) {
+      continue;
+    }
 
     declarations.push(`${property}: ${normalizeCssDeclarationValue(value)};`);
   }
@@ -297,32 +334,42 @@ function findCssDeclarationColon(css: string) {
   return -1;
 }
 
-function isSafeCssProperty(property: string) {
-  const normalized = decodeCssEscapes(property).trim().toLowerCase();
-  return normalized.length > 0 && !BLOCKED_CSS_PROPERTIES.has(normalized);
+function normalizeCssPropertyName(property: string) {
+  return decodeCssEscapes(property).trim().toLowerCase();
+}
+
+function isSafeCssProperty(normalizedProperty: string) {
+  return normalizedProperty.length > 0 && !BLOCKED_CSS_PROPERTIES.has(normalizedProperty);
 }
 
 function isSafeCssPrelude(prelude: string) {
   const normalized = normalizeCssForSafety(prelude);
   if (normalized.includes("@import")) return false;
-  return isSafeCssValue(prelude);
+  if (normalized.startsWith("@font-face")) return false;
+  if (hasUnsafeCssTokens(normalized)) return false;
+
+  const urls = extractCssUrls(decodeCssEscapes(stripCssComments(prelude)));
+  return urls !== null && urls.length === 0;
 }
 
-function isSafeCssValue(value: string) {
+function isSafeCssDeclarationValue(normalizedProperty: string, value: string) {
   const normalized = normalizeCssForSafety(value);
+  if (hasUnsafeCssTokens(normalized)) return false;
 
-  if (
+  const urls = extractCssUrls(decodeCssEscapes(stripCssComments(value)));
+  if (urls === null) return false;
+  if (urls.length > 0 && !CSS_URL_IMAGE_PROPERTIES.has(normalizedProperty)) return false;
+  return urls.every(isSafeCssUrl);
+}
+
+function hasUnsafeCssTokens(normalized: string) {
+  return (
     normalized.includes("javascript:") ||
     normalized.includes("vbscript:") ||
     normalized.includes("expression(") ||
     normalized.includes("behavior:") ||
     normalized.includes("-moz-binding")
-  ) {
-    return false;
-  }
-
-  const urls = extractCssUrls(value);
-  return urls !== null && urls.every(isSafeCssUrl);
+  );
 }
 
 function normalizeCssDeclarationValue(value: string) {
@@ -557,6 +604,18 @@ function isSafeCssUrl(value: string) {
   if (protocol === "http:" || protocol === "https:") return true;
   if (protocol === "data:") return /^data:image\/[a-z0-9.+-]+;base64,/i.test(trimmed);
   return protocol === "";
+}
+
+function isSafeHtmlAttributeName(name: string) {
+  return /^[^\s"'>/=]+$/.test(name);
+}
+
+function escapeHtmlAttribute(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 function isSafeHref(value: string) {

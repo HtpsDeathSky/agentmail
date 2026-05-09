@@ -88,12 +88,16 @@ let messages: MailMessage[] = [
     body_preview: "HTML Body",
     body: "Plain fallback",
     html_body: `
-      <section>
+      <html>
+        <body class="body-mail" style="background-color: #fff; color: #111;" onclick="alert(1)">
+          <section>
         <h2>HTML Body</h2>
         <p>Remote image follows.</p>
         <img src="https://example.com/pixel.png" alt="remote pixel">
         <img src="cid:logo@example.com" alt="inline logo">
-      </section>
+          </section>
+        </body>
+      </html>
     `,
     inline_resources: [
       {

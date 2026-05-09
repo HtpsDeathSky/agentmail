@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { InlineResource } from "../api";
-import { buildRenderableHtml } from "./mimeHtml";
+import { buildRenderableHtml, buildRenderableMailHtml } from "./mimeHtml";
 
 const logo: InlineResource = {
   id: "inline-1",
@@ -143,8 +143,8 @@ describe("buildRenderableHtml", () => {
     expect(document.querySelector(".mail-shell")?.textContent).toBe("body");
   });
 
-  it("preserves safe body attributes on the renderable wrapper", () => {
-    const rendered = buildRenderableHtml(
+  it("preserves safe body attributes in structured renderable output", () => {
+    const rendered = buildRenderableMailHtml(
       `
         <html>
           <head><style>.body .card { width: 640px; }</style></head>
@@ -155,14 +155,22 @@ describe("buildRenderableHtml", () => {
       `,
       []
     );
-    const document = new DOMParser().parseFromString(rendered, "text/html");
-    const wrapper = document.querySelector("body > div.body");
+    const bodyAttributeMap = new Map(rendered.bodyAttributes.map((attribute) => [attribute.name, attribute.value]));
 
-    expect(wrapper).not.toBeNull();
-    expect(wrapper?.getAttribute("style")).toContain("background-color: #fff;");
-    expect(wrapper?.getAttribute("style")).toContain("color: #111;");
-    expect(wrapper?.hasAttribute("onclick")).toBe(false);
+    expect(rendered.headStyles).toContain(".body .card");
+    expect(bodyAttributeMap.get("class")).toBe("body");
+    expect(bodyAttributeMap.get("style")).toContain("background-color: #fff;");
+    expect(bodyAttributeMap.get("style")).toContain("color: #111;");
+    expect(bodyAttributeMap.has("onclick")).toBe(false);
+    const document = new DOMParser().parseFromString(rendered.bodyHtml, "text/html");
     expect(document.querySelector(".card")?.textContent?.trim()).toBe("body");
+  });
+
+  it("keeps compatible wrapper output for legacy callers", () => {
+    const rendered = buildRenderableHtml('<body class="body"><div class="card">body</div></body>', []);
+    const document = new DOMParser().parseFromString(rendered, "text/html");
+
+    expect(document.querySelector("body > div.body .card")?.textContent).toBe("body");
   });
 
   it("keeps safe inline layout styles and background attributes", () => {
@@ -220,5 +228,50 @@ describe("buildRenderableHtml", () => {
     expect(document.querySelector("video")?.hasAttribute("src")).toBe(false);
     expect(document.querySelector("audio")?.hasAttribute("src")).toBe(false);
     expect(document.querySelector("source")?.hasAttribute("src")).toBe(false);
+  });
+
+  it("limits CSS URLs to image background declarations", () => {
+    const rendered = buildRenderableHtml(
+      `
+        <html>
+          <head>
+            <style>
+              @font-face { font-family: MailFont; src: url("https://cdn.example.com/font.woff2"); }
+              .cursor { cursor: url("https://cdn.example.com/cursor.cur"), auto; }
+              .escaped-cursor { cursor: u\\72l("https://cdn.example.com/escaped.cur"), auto; }
+              .content { content: url("https://cdn.example.com/badge.png"); }
+              .remote-bg { background-image: url("https://cdn.example.com/bg.png"); }
+              .relative-bg { background: #fff url("../images/panel.png"); }
+              .data-bg { background-image: url("data:image/png;base64,aW1hZ2U="); }
+              @media screen and (max-width: 640px) {
+                .media-bg { background-image: url("https://cdn.example.com/mobile.png"); }
+                .media-cursor { cursor: url("https://cdn.example.com/mobile.cur"), auto; }
+              }
+            </style>
+          </head>
+          <body>
+            <p style="cursor: url(https://cdn.example.com/cursor.cur), auto; background-image: url(https://cdn.example.com/inline.png);">body</p>
+          </body>
+        </html>
+      `,
+      []
+    );
+    const document = new DOMParser().parseFromString(rendered, "text/html");
+    const styleText = document.querySelector("style")?.textContent ?? "";
+    const inlineStyle = document.querySelector("p")?.getAttribute("style") ?? "";
+
+    expect(styleText).not.toContain("@font-face");
+    expect(styleText).not.toContain("font.woff2");
+    expect(styleText).not.toContain("cursor:");
+    expect(styleText).not.toContain("content:");
+    expect(styleText).not.toContain("cursor.cur");
+    expect(styleText).not.toContain("escaped.cur");
+    expect(styleText).toContain('background-image: url("https://cdn.example.com/bg.png");');
+    expect(styleText).toContain('background: #fff url("../images/panel.png");');
+    expect(styleText).toContain('background-image: url("data:image/png;base64,aW1hZ2U=");');
+    expect(styleText).toContain("@media screen and (max-width: 640px)");
+    expect(styleText).toContain('background-image: url("https://cdn.example.com/mobile.png");');
+    expect(inlineStyle).not.toContain("cursor");
+    expect(inlineStyle).toContain("background-image: url(https://cdn.example.com/inline.png);");
   });
 });

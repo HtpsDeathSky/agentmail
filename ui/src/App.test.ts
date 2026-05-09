@@ -143,6 +143,8 @@ describe("message detail rendering", () => {
       expect(htmlFrame?.getAttribute("sandbox")).toContain("allow-same-origin");
       expect(htmlFrame?.getAttribute("sandbox")).not.toContain("allow-scripts");
       expect(htmlFrame?.srcdoc).toContain("HTML Body");
+      expect(htmlFrame?.srcdoc).toContain('<body class="body-mail" style="background-color: #fff; color: #111;">');
+      expect(htmlFrame?.srcdoc).not.toContain('<body><div class="body-mail"');
       expect(app.container.querySelector(".metadata-grid")).toBeNull();
       expect(await findText(app.container, "Sender")).not.toBeNull();
       expect(await findText(app.container, "sender@example.com")).not.toBeNull();

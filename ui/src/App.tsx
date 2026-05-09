@@ -76,7 +76,7 @@ import {
   shouldAutoMarkRead,
   shouldRefreshAiInsightsForAnalyzedMessage
 } from "./lib/mailActions";
-import { buildRenderableHtml } from "./lib/mimeHtml";
+import { buildRenderableMailHtml, serializeHtmlAttributes, type RenderableMailHtml } from "./lib/mimeHtml";
 const defaultAccountConfigForm: SaveAccountConfigRequest = {
   id: null,
   display_name: "",
@@ -215,7 +215,7 @@ function splitMailbox(value: string) {
   };
 }
 
-function HtmlMailFrame({ html }: { html: string }) {
+function HtmlMailFrame({ html }: { html: RenderableMailHtml }) {
   const [height, setHeight] = useState(360);
 
   const resizeFrameElement = useCallback((frame: HTMLIFrameElement) => {
@@ -267,8 +267,9 @@ function HtmlMailFrame({ html }: { html: string }) {
         white-space: pre-wrap;
       }
     </style>
+    ${html.headStyles}
   </head>
-  <body>${html}</body>
+  <body${serializeHtmlAttributes(html.bodyAttributes)}>${html.bodyHtml}</body>
 </html>`,
     [html]
   );
@@ -960,7 +961,7 @@ export function App() {
       ]
     : [];
   const selectedRenderableHtml = selectedMessage?.html_body
-    ? buildRenderableHtml(selectedMessage.html_body, selectedMessage.inline_resources ?? [])
+    ? buildRenderableMailHtml(selectedMessage.html_body, selectedMessage.inline_resources ?? [])
     : null;
 
   return (
