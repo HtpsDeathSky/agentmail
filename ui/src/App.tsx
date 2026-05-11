@@ -147,7 +147,30 @@ const WORKSPACE_DETAIL_MIN_WIDTH = 420;
 const WORKSPACE_DIVIDER_WIDTH = 8;
 export const MESSAGE_HEADER_STICKY_Z_INDEX = 2;
 export const MODAL_BACKDROP_Z_INDEX = 100;
+export const MESSAGE_ENVELOPE_BORDER_MODE = "full";
 const modalBackdropStyle: CSSProperties = { zIndex: MODAL_BACKDROP_Z_INDEX };
+
+export function getMessageEnvelopeBorderMode() {
+  return MESSAGE_ENVELOPE_BORDER_MODE;
+}
+
+export function getResponsiveMessageDetailRows(viewportHeight: number, topbarHeight: number, activityLogHeight: number) {
+  const workspaceHeight = viewportHeight - topbarHeight - activityLogHeight;
+  const accountRailHeight = Math.max(96, workspaceHeight * 0.2);
+  const mailWorkspaceHeight = workspaceHeight - accountRailHeight;
+  const messageListHeight = Math.max(180, mailWorkspaceHeight * 0.34);
+  const detailPaneHeight = mailWorkspaceHeight - messageListHeight;
+  const detailScrollHeight = detailPaneHeight - 48;
+
+  return {
+    workspaceHeight,
+    accountRailHeight,
+    mailWorkspaceHeight,
+    messageListHeight,
+    detailPaneHeight,
+    detailScrollHeight
+  };
+}
 
 interface MessageContextMenuState {
   messageId: string;

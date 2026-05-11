@@ -9,6 +9,8 @@ import {
   getAccountProviderFormMode,
   getAppShellClassName,
   inferAccountProvider,
+  getMessageEnvelopeBorderMode,
+  getResponsiveMessageDetailRows,
   getWorkspaceSplitModel,
   MESSAGE_HEADER_STICKY_Z_INDEX,
   MODAL_BACKDROP_Z_INDEX,
@@ -158,6 +160,12 @@ describe("message detail rendering", () => {
   });
 });
 
+describe("message envelope styles", () => {
+  it("uses a complete border around the mail header card", () => {
+    expect(getMessageEnvelopeBorderMode()).toBe("full");
+  });
+});
+
 describe("modal layer styles", () => {
   it("keeps modal backdrops above sticky message header metadata", async () => {
     const app = await renderAppForTest();
@@ -176,6 +184,19 @@ describe("modal layer styles", () => {
     } finally {
       await app.unmount();
     }
+  });
+});
+
+describe("responsive message detail layout", () => {
+  it("keeps enough medium-width detail height to show the complete message header card", () => {
+    const rows = getResponsiveMessageDetailRows(768, 58, 118);
+
+    expect(rows.workspaceHeight).toBe(592);
+    expect(rows.accountRailHeight).toBeCloseTo(118.4, 1);
+    expect(rows.mailWorkspaceHeight).toBeCloseTo(473.6, 1);
+    expect(rows.messageListHeight).toBe(180);
+    expect(rows.detailPaneHeight).toBeCloseTo(293.6, 1);
+    expect(rows.detailScrollHeight).toBeGreaterThan(175);
   });
 });
 

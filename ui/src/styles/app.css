@@ -745,7 +745,7 @@ select {
   margin: 18px 0 16px;
   min-width: 0;
   padding: 13px 14px;
-  border-block: 1px solid var(--color-border);
+  border: 1px solid var(--color-border);
   background: var(--color-surface-muted);
   box-shadow: 0 1px 0 var(--color-border);
   overflow-wrap: anywhere;
@@ -1541,7 +1541,7 @@ select {
   }
 
   .workspace {
-    grid-template-rows: minmax(120px, 26%) minmax(0, 1fr);
+    grid-template-rows: minmax(96px, 20%) minmax(0, 1fr);
     min-height: 0;
   }
 
@@ -1551,7 +1551,7 @@ select {
 
   .mail-workspace {
     display: grid;
-    grid-template-rows: minmax(220px, 38%) minmax(0, 1fr);
+    grid-template-rows: minmax(180px, 34%) minmax(0, 1fr);
   }
 
   .workspace-divider {
