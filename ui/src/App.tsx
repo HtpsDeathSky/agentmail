@@ -145,6 +145,9 @@ export const MAIL_SYNC_EVENT = "agentmail-mail-sync";
 const WORKSPACE_LIST_MIN_WIDTH = 320;
 const WORKSPACE_DETAIL_MIN_WIDTH = 420;
 const WORKSPACE_DIVIDER_WIDTH = 8;
+export const MESSAGE_HEADER_STICKY_Z_INDEX = 2;
+export const MODAL_BACKDROP_Z_INDEX = 100;
+const modalBackdropStyle: CSSProperties = { zIndex: MODAL_BACKDROP_Z_INDEX };
 
 interface MessageContextMenuState {
   messageId: string;
@@ -1563,7 +1566,7 @@ function ConfigurationModal({
   };
 
   return (
-    <div className="modal-backdrop" role="presentation">
+    <div className="modal-backdrop" role="presentation" style={modalBackdropStyle}>
       <section className="modal-panel configuration-panel" role="dialog" aria-modal="true" aria-label="Configuration">
         <header>
           <h2>CONFIGURATION</h2>
@@ -1777,7 +1780,7 @@ function Composer({ account, onClose, onSent }: ComposerProps) {
   };
 
   return (
-    <div className="modal-backdrop" role="presentation">
+    <div className="modal-backdrop" role="presentation" style={modalBackdropStyle}>
       <form className="modal-panel composer-panel" onSubmit={submit}>
         <header>
           <h2>COMPOSE</h2>

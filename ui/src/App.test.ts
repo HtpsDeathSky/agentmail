@@ -10,6 +10,8 @@ import {
   getAppShellClassName,
   inferAccountProvider,
   getWorkspaceSplitModel,
+  MESSAGE_HEADER_STICKY_Z_INDEX,
+  MODAL_BACKDROP_Z_INDEX,
   runGoogleSignInFlow
 } from "./App";
 import {
@@ -150,6 +152,27 @@ describe("message detail rendering", () => {
       expect(await findText(app.container, "sender@example.com")).not.toBeNull();
       expect(await findText(app.container, "ops@example.com")).not.toBeNull();
       expect(await findText(app.container, "audit@example.com")).not.toBeNull();
+    } finally {
+      await app.unmount();
+    }
+  });
+});
+
+describe("modal layer styles", () => {
+  it("keeps modal backdrops above sticky message header metadata", async () => {
+    const app = await renderAppForTest();
+
+    try {
+      const configButton = await findSelector(app.container, "button[title='Configuration']");
+
+      await act(async () => {
+        configButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      const backdrop = await findSelector(app.container, ".modal-backdrop");
+
+      expect(Number((backdrop as HTMLElement).style.zIndex)).toBe(MODAL_BACKDROP_Z_INDEX);
+      expect(MODAL_BACKDROP_Z_INDEX).toBeGreaterThan(MESSAGE_HEADER_STICKY_Z_INDEX);
     } finally {
       await app.unmount();
     }
