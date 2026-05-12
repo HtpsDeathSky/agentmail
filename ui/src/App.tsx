@@ -173,11 +173,7 @@ export function getResponsiveMessageDetailRows(
   const detailPaneHeight = mailWorkspaceHeight - messageListHeight;
   const detailToolbarHeight = 48;
   const messageHeaderFixedHeight = usesCompactRows ? 132 : 96;
-  const aiPanelHeight = usesCompactRows ? 64 : 220;
-  const messageBodyScrollHeight = Math.max(
-    1,
-    detailPaneHeight - detailToolbarHeight - messageHeaderFixedHeight - aiPanelHeight
-  );
+  const messageBodyScrollHeight = Math.max(1, detailPaneHeight - detailToolbarHeight - messageHeaderFixedHeight);
 
   return {
     workspaceHeight,
@@ -187,7 +183,6 @@ export function getResponsiveMessageDetailRows(
     detailPaneHeight,
     detailToolbarHeight,
     messageHeaderFixedHeight,
-    aiPanelHeight,
     messageBodyScrollHeight
   };
 }
@@ -362,7 +357,7 @@ export function App() {
   const [isActionRunning, setActionRunning] = useState(false);
   const [isManualSyncing, setManualSyncing] = useState(false);
   const [activityLogEntries, setActivityLogEntries] = useState<ActivityLogEntry[]>([]);
-  const [aiStatus, setAiStatus] = useState("ai link idle");
+  const [, setAiStatus] = useState("ai link idle");
   const [themeMode, setThemeMode] = useState<ThemeMode>(() =>
     typeof window === "undefined" ? "dark" : readStoredThemeMode(window.localStorage)
   );
@@ -998,6 +993,7 @@ export function App() {
   const selectedSender = selectedMessage ? splitMailbox(selectedMessage.sender) : null;
   const selectedRecipients = selectedMessage?.recipients.map(splitMailbox) ?? [];
   const selectedCc = selectedMessage?.cc.map(splitMailbox) ?? [];
+  const selectedLatestInsight = aiInsights[0] ?? null;
   const selectedMessageSecondaryMeta = selectedMessage
     ? [
         formatTime(selectedMessage.received_at),
@@ -1181,12 +1177,19 @@ export function App() {
                     <Trash2 size={15} />
                     DELETE
                   </button>
+                  <button
+                    type="button"
+                    onClick={handleSelectedAnalyze}
+                    disabled={isAnalyzing || isActionRunning || !aiSettings?.enabled}
+                  >
+                    {isAnalyzing ? "RUNNING" : "ANALYZE"}
+                  </button>
                 </div>
                 <article className="message-reading-shell">
                   <div className="message-header-fixed">
                     <div className="message-heading">
                       <span className={selectedMessage.flags.is_read ? "read-dot" : "unread-dot"} />
-                      <h1>{selectedMessage.subject}</h1>
+                      <p>{selectedMessage.subject}</p>
                     </div>
                     <div className="message-envelope">
                       <div className="sender-identity">
@@ -1227,6 +1230,16 @@ export function App() {
                           <span key={item}>{item}</span>
                         ))}
                       </div>
+                      {selectedLatestInsight ? (
+                        <div className="message-ai-summary">
+                          <span>AI</span>
+                          <div>
+                            <strong>{selectedLatestInsight.category || "uncategorized"}</strong>
+                            <code>{selectedLatestInsight.priority}</code>
+                            <p>{selectedLatestInsight.summary}</p>
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                   <div className="message-body-scroll">
@@ -1249,14 +1262,6 @@ export function App() {
                     ) : null}
                   </div>
                 </article>
-                <AiPanel
-                  settings={aiSettings}
-                  insights={aiInsights}
-                  status={aiStatus}
-                  isAnalyzing={isAnalyzing}
-                  isActionRunning={isActionRunning}
-                  onAnalyze={handleSelectedAnalyze}
-                />
               </>
             ) : (
               <div className="empty-detail">
@@ -1299,76 +1304,6 @@ export function App() {
         />
       ) : null}
     </main>
-  );
-}
-
-interface AiPanelProps {
-  settings: AiSettingsView | null;
-  insights: AiInsight[];
-  status: string;
-  isAnalyzing: boolean;
-  isActionRunning: boolean;
-  onAnalyze: () => Promise<void>;
-}
-
-function AiPanel({ settings, insights, status, isAnalyzing, isActionRunning, onAnalyze }: AiPanelProps) {
-  const latest = insights[0] ?? null;
-  const keyStatus = settings?.api_key_mask ? settings.api_key_mask : "not set";
-
-  return (
-    <aside className="ai-panel">
-      <header>
-        <div>
-          <PanelRight size={15} />
-          <span>AI</span>
-        </div>
-      </header>
-      <div className="ai-status-grid">
-        <span>PROVIDER</span>
-        <code>{settings?.provider_name ?? "not set"}</code>
-        <span>MODEL</span>
-        <code>{settings?.model || "not set"}</code>
-        <span>KEY</span>
-        <code>{keyStatus}</code>
-      </div>
-      <div className="ai-actions">
-        <button type="button" onClick={onAnalyze} disabled={isAnalyzing || isActionRunning || !settings?.enabled}>
-          {isAnalyzing ? "RUNNING" : "AI ANALYZE"}
-        </button>
-        <span>{settings?.enabled ? "enabled" : "disabled"}</span>
-      </div>
-      {latest ? (
-        <section className="ai-result">
-          <div>
-            <strong>{latest.category || "uncategorized"}</strong>
-            <code>{latest.priority}</code>
-          </div>
-          <p>{latest.summary}</p>
-          {latest.todos.length > 0 ? (
-            <ul className="ai-todo-list">
-              {latest.todos.map((todo) => (
-                <li key={todo}>{todo}</li>
-              ))}
-            </ul>
-          ) : null}
-          {latest.reply_draft ? <pre>{latest.reply_draft}</pre> : null}
-        </section>
-      ) : (
-        <section className="ai-result empty">No insight for this message.</section>
-      )}
-      {insights.length > 0 ? (
-        <div className="ai-history">
-          {insights.map((insight) => (
-            <div key={insight.id}>
-              <time>{formatTime(insight.created_at)}</time>
-              <span>{insight.category || "uncategorized"}</span>
-              <code>{insight.priority}</code>
-            </div>
-          ))}
-        </div>
-      ) : null}
-      <p className="ai-status-text">{status}</p>
-    </aside>
   );
 }
 

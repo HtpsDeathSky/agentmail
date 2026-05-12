@@ -98,6 +98,23 @@ async function findText(container: ParentNode, text: string, timeoutMs = 3000) {
   throw new Error(`Text not found: ${text}`);
 }
 
+async function findEnabledButton(container: ParentNode, text: string, timeoutMs = 3000) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const match = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === text && !button.disabled
+    );
+    if (match) return match;
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 25));
+    });
+  }
+
+  throw new Error(`Enabled button not found: ${text}`);
+}
+
 function queryText(container: ParentNode, text: string) {
   return Array.from(container.querySelectorAll("*")).find((element) => element.textContent?.trim() === text) ?? null;
 }
@@ -160,7 +177,7 @@ describe("message detail rendering", () => {
     }
   });
 
-  it("keeps mail metadata and AI outside the body-only scroll region", async () => {
+  it("keeps mail metadata in the fixed header and removes the bottom AI panel", async () => {
     const app = await renderAppForTest();
 
     try {
@@ -172,15 +189,52 @@ describe("message detail rendering", () => {
       const readingShell = await findSelector(app.container, ".message-reading-shell");
       const fixedHeader = await findSelector(app.container, ".message-header-fixed");
       const bodyScroll = await findSelector(app.container, ".message-body-scroll");
-      const aiPanel = await findSelector(app.container, ".ai-panel");
 
       expect(readingShell.contains(fixedHeader)).toBe(true);
       expect(readingShell.contains(bodyScroll)).toBe(true);
-      expect(readingShell.contains(aiPanel)).toBe(false);
-      expect(bodyScroll.contains(aiPanel)).toBe(false);
+      expect(app.container.querySelector(".ai-panel")).toBeNull();
       expect(fixedHeader.querySelector(".message-heading")).not.toBeNull();
       expect(fixedHeader.querySelector(".message-envelope")).not.toBeNull();
       expect(bodyScroll.querySelector(".body-html-block")).not.toBeNull();
+    } finally {
+      await app.unmount();
+    }
+  });
+
+  it("places ANALYZE immediately after DELETE in the detail toolbar", async () => {
+    const app = await renderAppForTest();
+
+    try {
+      const toolbar = await findSelector(app.container, ".detail-toolbar");
+      const labels = Array.from(toolbar.querySelectorAll("button")).map((button) => button.textContent?.trim());
+
+      expect(labels).toEqual(["UNSTAR", "DELETE", "ANALYZE"]);
+    } finally {
+      await app.unmount();
+    }
+  });
+
+  it("renders the latest AI summary inside the fixed message header after analysis", async () => {
+    const app = await renderAppForTest();
+
+    try {
+      const htmlMessage = await findText(app.container, "Release train notes");
+      await act(async () => {
+        htmlMessage.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      const analyze = await findEnabledButton(app.container, "ANALYZE");
+      await act(async () => {
+        analyze.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      const summary = await findText(app.container, "邮件说明 Build 42 已通过冒烟测试，同时当前 MVP 仍保持邮件客户端遥测关闭。");
+      const fixedHeader = await findSelector(app.container, ".message-header-fixed");
+      const envelope = await findSelector(app.container, ".message-envelope");
+
+      expect(fixedHeader.contains(summary)).toBe(true);
+      expect(envelope.contains(summary)).toBe(true);
+      expect(app.container.querySelector(".ai-panel")).toBeNull();
     } finally {
       await app.unmount();
     }
@@ -224,7 +278,8 @@ describe("responsive message detail layout", () => {
     expect(rows.mailWorkspaceHeight).toBeCloseTo(473.6, 1);
     expect(rows.messageListHeight).toBeCloseTo(75.8, 1);
     expect(rows.detailPaneHeight).toBeCloseTo(397.8, 1);
-    expect(rows.messageBodyScrollHeight).toBeGreaterThan(48);
+    expect(rows).not.toHaveProperty("aiPanelHeight");
+    expect(rows.messageBodyScrollHeight).toBeCloseTo(217.8, 1);
   });
 });
 
