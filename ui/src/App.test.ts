@@ -42,7 +42,7 @@ import {
   shouldAutoMarkRead,
   shouldRefreshAiInsightsForAnalyzedMessage
 } from "./lib/mailActions";
-import type { MailMessage } from "./api";
+import { api, type MailMessage } from "./api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -236,6 +236,33 @@ describe("message detail rendering", () => {
       expect(envelope.contains(summary)).toBe(true);
       expect(app.container.querySelector(".ai-panel")).toBeNull();
     } finally {
+      await app.unmount();
+    }
+  });
+
+  it("surfaces selected-message AI insight load failures in visible status", async () => {
+    const listAiInsights = vi.spyOn(api, "listAiInsights");
+    listAiInsights.mockImplementation((messageId: string) => {
+      if (messageId === "msg-html-001") {
+        return Promise.reject(new Error("insight index offline"));
+      }
+      return Promise.resolve([]);
+    });
+
+    const app = await renderAppForTest();
+
+    try {
+      const htmlMessage = await findText(app.container, "HTML newsletter preview");
+      await act(async () => {
+        htmlMessage.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      const status = await findText(app.container, "ai insight load failed: Error: insight index offline");
+
+      expect(status.closest(".message-envelope")).not.toBeNull();
+      expect(app.container.querySelector(".ai-panel")).toBeNull();
+    } finally {
+      listAiInsights.mockRestore();
       await app.unmount();
     }
   });

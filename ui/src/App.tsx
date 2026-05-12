@@ -357,7 +357,7 @@ export function App() {
   const [isActionRunning, setActionRunning] = useState(false);
   const [isManualSyncing, setManualSyncing] = useState(false);
   const [activityLogEntries, setActivityLogEntries] = useState<ActivityLogEntry[]>([]);
-  const [, setAiStatus] = useState("ai link idle");
+  const [selectedAiStatus, setSelectedAiStatus] = useState<string | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() =>
     typeof window === "undefined" ? "dark" : readStoredThemeMode(window.localStorage)
   );
@@ -653,7 +653,7 @@ export function App() {
 
   useEffect(() => {
     setAiInsights([]);
-    setAiStatus("ai link idle");
+    setSelectedAiStatus(null);
     if (!selectedMessageId) return;
     let isCancelled = false;
     const messageId = selectedMessageId;
@@ -663,12 +663,17 @@ export function App() {
         if (!isCancelled) setAiInsights(insights);
       })
       .catch((error) => {
-        if (!isCancelled) setAiStatus(`ai insight load failed: ${String(error)}`);
+        if (!isCancelled) {
+          const nextStatus = `ai insight load failed: ${String(error)}`;
+          setSelectedAiStatus(nextStatus);
+          setStatus(nextStatus);
+          appendActivityLog(nextStatus);
+        }
       });
     return () => {
       isCancelled = true;
     };
-  }, [selectedMessageId]);
+  }, [appendActivityLog, selectedMessageId]);
 
   const handleSync = useCallback(async () => {
     if (!selectedAccountId || isManualSyncing) return;
@@ -835,7 +840,7 @@ export function App() {
     setAnalyzing(true);
     setStatus(`ai analysis running: ${message.subject}`);
     if (shouldRefreshAiInsightsForAnalyzedMessage(messageId, selectedMessageIdRef.current)) {
-      setAiStatus("ai analysis running");
+      setSelectedAiStatus(null);
     }
     appendActivityLog(`ai analysis started: ${messageId}`);
     try {
@@ -844,7 +849,7 @@ export function App() {
         const insights = await api.listAiInsights(messageId);
         if (shouldRefreshAiInsightsForAnalyzedMessage(messageId, selectedMessageIdRef.current)) {
           setAiInsights(insights);
-          setAiStatus("ai analysis complete");
+          setSelectedAiStatus(null);
         }
       }
       setStatus(`ai analysis complete: ${message.subject}`);
@@ -853,7 +858,7 @@ export function App() {
       const nextStatus = `ai analysis failed: ${String(error)}`;
       setStatus(nextStatus);
       if (shouldRefreshAiInsightsForAnalyzedMessage(messageId, selectedMessageIdRef.current)) {
-        setAiStatus(nextStatus);
+        setSelectedAiStatus(nextStatus);
         appendActivityLog(nextStatus);
       } else {
         appendActivityLog(`ai analysis failed: ${messageId} / ${String(error)}`);
@@ -1240,6 +1245,7 @@ export function App() {
                           </div>
                         </div>
                       ) : null}
+                      {selectedAiStatus ? <div className="message-ai-status">{selectedAiStatus}</div> : null}
                     </div>
                   </div>
                   <div className="message-body-scroll">
