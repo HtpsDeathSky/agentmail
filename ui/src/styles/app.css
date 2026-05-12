@@ -894,14 +894,14 @@ select {
   border: 0;
   border-radius: 0;
   background: #fff;
-  overflow: hidden;
+  overflow: auto hidden;
 }
 
 .body-html-frame {
   display: block;
   width: 100%;
   border: 0;
-  background: #fff;
+  background: transparent;
 }
 
 .message-body-scroll--html .attachment-strip {

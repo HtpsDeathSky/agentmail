@@ -261,43 +261,8 @@ function splitMailbox(value: string) {
   };
 }
 
-const GENERATED_VERTICAL_OVERFLOW_GUARD_STYLE = "overflow-y: hidden !important;";
-
 function serializeHtmlMailBodyAttributes(attributes: RenderableMailHtml["bodyAttributes"]) {
-  const normalizedAttributes = attributes
-    .map((attribute) =>
-      attribute.name.toLowerCase() === "style"
-        ? { ...attribute, value: appendVerticalOverflowGuardStyle(removeVerticalOverflowStyle(attribute.value)) }
-        : attribute
-    )
-    .filter((attribute) => attribute.name.toLowerCase() !== "style" || attribute.value.trim());
-
-  const hasStyleAttribute = normalizedAttributes.some((attribute) => attribute.name.toLowerCase() === "style");
-  const guardedAttributes = hasStyleAttribute
-    ? normalizedAttributes
-    : [...normalizedAttributes, { name: "style", value: GENERATED_VERTICAL_OVERFLOW_GUARD_STYLE }];
-
-  return serializeHtmlAttributes(guardedAttributes);
-}
-
-function removeVerticalOverflowStyle(style: string) {
-  const declarations = style
-    .split(";")
-    .map((declaration) => declaration.trim())
-    .filter((declaration) => {
-      if (!declaration) return false;
-      const colonIndex = declaration.indexOf(":");
-      if (colonIndex < 0) return false;
-      const property = declaration.slice(0, colonIndex).trim().toLowerCase();
-      return property !== "overflow" && property !== "overflow-y";
-    });
-
-  return declarations.length > 0 ? `${declarations.join("; ")};` : "";
-}
-
-function appendVerticalOverflowGuardStyle(style: string) {
-  const trimmed = style.trim();
-  return trimmed ? `${trimmed} ${GENERATED_VERTICAL_OVERFLOW_GUARD_STYLE}` : GENERATED_VERTICAL_OVERFLOW_GUARD_STYLE;
+  return serializeHtmlAttributes(attributes);
 }
 
 export function buildHtmlMailFrameDocument(html: RenderableMailHtml) {
@@ -311,88 +276,40 @@ export function buildHtmlMailFrameDocument(html: RenderableMailHtml) {
       html,
       body {
         margin: 0;
-        padding: 0;
-        overflow-x: hidden;
-        overflow-y: hidden;
-        background: #fff;
-        color: #111;
+        background: transparent;
         color-scheme: light;
       }
 
-      body {
-        box-sizing: border-box;
-        overflow-wrap: anywhere;
-        width: 100%;
-        max-width: 100%;
-        padding: 16px;
-        font: 14px/1.5 Arial, Helvetica, sans-serif;
-      }
-
-      *, *::before, *::after {
-        box-sizing: border-box;
-      }
-
       img {
-        max-width: 100%;
         height: auto;
       }
 
-      table {
-        width: auto;
-        max-width: 100%;
-      }
-
       pre {
-        max-width: 100%;
-        overflow-x: auto;
         white-space: pre-wrap;
       }
     </style>
     ${html.headStyles}
-    <style>
-      html,
-      body,
-      #mail-root {
-        overflow-y: hidden;
-      }
-    </style>
   </head>
-  <body${serializeHtmlMailBodyAttributes(html.bodyAttributes)}><div id="mail-root" style="${GENERATED_VERTICAL_OVERFLOW_GUARD_STYLE}">${html.bodyHtml}</div><style>
-      html,
-      body,
-      body[style],
-      body[class],
-      body.body-mail,
-      #mail-root {
-        overflow-y: hidden !important;
-      }
-    </style>
-  </body>
+  <body${serializeHtmlMailBodyAttributes(html.bodyAttributes)}>${html.bodyHtml}</body>
 </html>`;
 }
 
 interface HtmlMailFrameHeightMetrics {
   scrollHeight: number;
-  offsetHeight: number;
+  offsetHeight?: number;
   clientHeight?: number;
 }
 
 type HtmlMailFrameHeightElement = HtmlMailFrameHeightMetrics | null | undefined;
 
 export function getHtmlMailFrameMeasuredHeight({
-  root,
+  documentElement,
   body
 }: {
-  root: HtmlMailFrameHeightElement;
+  documentElement: HtmlMailFrameHeightElement;
   body: HtmlMailFrameHeightElement;
 }) {
-  const contentHeight = Math.max(
-    root?.scrollHeight ?? 0,
-    root?.offsetHeight ?? 0,
-    body?.scrollHeight ?? 0,
-    body?.offsetHeight ?? 0,
-    1
-  );
+  const contentHeight = Math.max(documentElement?.scrollHeight ?? 0, body?.scrollHeight ?? 0, 1);
 
   return Math.min(contentHeight, 16000);
 }
@@ -401,9 +318,13 @@ function HtmlMailFrame({ html, onMeasured }: { html: RenderableMailHtml; onMeasu
   const [height, setHeight] = useState(180);
 
   const resizeFrameElement = useCallback((frame: HTMLIFrameElement) => {
-    const body = frame.contentDocument?.body;
-    const root = frame.contentDocument?.getElementById("mail-root");
-    setHeight(getHtmlMailFrameMeasuredHeight({ root, body }));
+    const frameDocument = frame.contentDocument;
+    setHeight(
+      getHtmlMailFrameMeasuredHeight({
+        documentElement: frameDocument?.documentElement,
+        body: frameDocument?.body
+      })
+    );
     onMeasured();
   }, [onMeasured]);
 

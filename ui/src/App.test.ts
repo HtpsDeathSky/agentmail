@@ -167,11 +167,14 @@ describe("message detail rendering", () => {
       expect(htmlFrame?.getAttribute("sandbox")).toContain("allow-popups");
       expect(htmlFrame?.getAttribute("sandbox")).toContain("allow-same-origin");
       expect(htmlFrame?.getAttribute("sandbox")).not.toContain("allow-scripts");
+      expect(htmlFrame?.getAttribute("sandbox")).not.toContain("allow-forms");
       expect(htmlFrame?.srcdoc).toContain("HTML Body");
-      expect(htmlFrame?.srcdoc).toContain(
-        '<body class="body-mail" style="background-color: #fff; color: #111; overflow-y: hidden !important;">'
-      );
-      expect(htmlFrame?.srcdoc).toContain('<div id="mail-root" style="overflow-y: hidden !important;">');
+      expect(htmlFrame?.srcdoc).toContain('<body class="body-mail" style="background-color: #fff; color: #111;">');
+      expect(htmlFrame?.srcdoc).not.toContain('id="mail-root"');
+      expect(htmlFrame?.srcdoc).not.toContain("overflow-y: hidden !important");
+      expect(htmlFrame?.srcdoc).not.toContain("table {");
+      expect(htmlFrame?.srcdoc).not.toContain("width: auto");
+      expect(htmlFrame?.srcdoc).not.toContain("padding: 16px");
       expect(htmlFrame?.srcdoc).not.toContain('<body><div class="body-mail"');
       expect(app.container.querySelector(".metadata-grid")).toBeNull();
       expect(await findText(app.container, "Sender")).not.toBeNull();
@@ -233,7 +236,34 @@ describe("message detail rendering", () => {
     }
   });
 
-  it("suppresses native vertical scrolling inside html iframe documents", async () => {
+  it("builds a minimal html iframe document without generated table or root layout overrides", () => {
+    const document = buildHtmlMailFrameDocument({
+      headStyles:
+        '<style>@import url("https://cdn.example.com/base.css"); @font-face { font-family: MailFont; src: url("https://cdn.example.com/font.woff2"); } table.edm { width: 640px; }</style><link rel="stylesheet" href="https://cdn.example.com/newsletter.css">',
+      bodyAttributes: [
+        { name: "class", value: "body-mail" },
+        { name: "style", value: "background-color: #fff; color: #111;" }
+      ],
+      bodyHtml:
+        '<table class="edm" width="640" style="width:640px;background:url(https://cdn.example.com/bg.png)"><tr><td>Body</td></tr></table>'
+    });
+
+    expect(document).toContain('<base target="_blank">');
+    expect(document).toContain('<link rel="stylesheet" href="https://cdn.example.com/newsletter.css">');
+    expect(document).toContain('@font-face { font-family: MailFont; src: url("https://cdn.example.com/font.woff2"); }');
+    expect(document).toContain('<body class="body-mail" style="background-color: #fff; color: #111;">');
+    expect(document).toContain(
+      '<table class="edm" width="640" style="width:640px;background:url(https://cdn.example.com/bg.png)">'
+    );
+    expect(document).not.toContain('id="mail-root"');
+    expect(document).not.toContain("overflow-y: hidden !important");
+    expect(document).not.toContain("table {");
+    expect(document).not.toContain("width: auto");
+    expect(document).not.toContain("max-width: 100%");
+    expect(document).not.toContain("padding: 16px");
+  });
+
+  it("keeps the iframe sandbox scriptless and formless", async () => {
     const app = await renderAppForTest();
 
     try {
@@ -243,51 +273,45 @@ describe("message detail rendering", () => {
       });
 
       const htmlFrame = await findSelector(app.container, ".body-html-frame") as HTMLIFrameElement;
+      const sandbox = htmlFrame.getAttribute("sandbox") ?? "";
 
-      expect(htmlFrame.srcdoc).toContain("overflow-y: hidden");
-      expect(htmlFrame.srcdoc).toContain("overflow-x: hidden");
-      expect(htmlFrame.srcdoc).toContain("max-width: 100%");
-      expect(htmlFrame.srcdoc).toContain(
-        '<body class="body-mail" style="background-color: #fff; color: #111; overflow-y: hidden !important;">'
-      );
-      expect(htmlFrame.srcdoc).toContain('<div id="mail-root" style="overflow-y: hidden !important;">');
+      expect(sandbox).toContain("allow-same-origin");
+      expect(sandbox).toContain("allow-popups");
+      expect(sandbox).toContain("allow-popups-to-escape-sandbox");
+      expect(sandbox).not.toContain("allow-scripts");
+      expect(sandbox).not.toContain("allow-forms");
     } finally {
       await app.unmount();
     }
   });
 
-  it("keeps html iframe vertical scrolling suppressed after hostile mail styles", () => {
+  it("keeps external links opening outside the iframe document", () => {
     const document = buildHtmlMailFrameDocument({
-      headStyles:
-        "<style>body { overflow-y: scroll !important; } html { overflow-y: scroll !important; } body.body-mail { overflow-y: scroll !important; } html body.body-mail { overflow-y: scroll !important; }</style>",
-      bodyAttributes: [
-        { name: "class", value: "body-mail" },
-        { name: "style", value: "overflow-y: scroll !important; color: #111;" }
-      ],
-      bodyHtml:
-        '<style>body.body-mail { overflow-y: scroll !important; } html body.body-mail { overflow-y: scroll !important; }</style><p>Hostile overflow</p>'
+      headStyles: "",
+      bodyAttributes: [],
+      bodyHtml: '<a href="https://example.com/report" target="_blank" rel="noopener noreferrer">Report</a>'
     });
-    const injectedStyleIndex = document.lastIndexOf("html body.body-mail { overflow-y: scroll !important; }");
-    const finalGuardIndex = document.lastIndexOf("body.body-mail");
-    const bodyTagMatch = document.match(/<body([^>]*)>/);
-    const rootTagMatch = document.match(/<div id="mail-root"([^>]*)>/);
 
-    expect(injectedStyleIndex).toBeGreaterThan(-1);
-    expect(finalGuardIndex).toBeGreaterThan(injectedStyleIndex);
-    expect(document.slice(finalGuardIndex)).toContain("overflow-y: hidden !important");
-    expect(bodyTagMatch?.[1]).toContain("color: #111");
-    expect(bodyTagMatch?.[1]).toContain("overflow-y: hidden !important");
-    expect(rootTagMatch?.[1]).toContain("overflow-y: hidden !important");
-    expect(bodyTagMatch?.[1]).not.toContain("overflow-y: scroll");
+    expect(document).toContain('<base target="_blank">');
+    expect(document).toContain(
+      '<a href="https://example.com/report" target="_blank" rel="noopener noreferrer">Report</a>'
+    );
   });
 
-  it("measures html iframe height from content metrics without preserving client height", () => {
+  it("measures html iframe height from document and body scroll heights only", () => {
     expect(
       getHtmlMailFrameMeasuredHeight({
-        root: { scrollHeight: 64, offsetHeight: 64, clientHeight: 360 },
-        body: { scrollHeight: 80, offsetHeight: 80, clientHeight: 360 }
+        documentElement: { scrollHeight: 420, offsetHeight: 999, clientHeight: 999 },
+        body: { scrollHeight: 360, offsetHeight: 888, clientHeight: 888 }
       })
-    ).toBe(80);
+    ).toBe(420);
+
+    expect(
+      getHtmlMailFrameMeasuredHeight({
+        documentElement: { scrollHeight: 0, offsetHeight: 999, clientHeight: 999 },
+        body: { scrollHeight: 280, offsetHeight: 888, clientHeight: 888 }
+      })
+    ).toBe(280);
   });
 
   it("places ANALYZE immediately after DELETE in the detail toolbar", async () => {
