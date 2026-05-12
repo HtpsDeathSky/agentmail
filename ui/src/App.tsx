@@ -148,10 +148,15 @@ const WORKSPACE_DIVIDER_WIDTH = 8;
 export const MESSAGE_HEADER_STICKY_Z_INDEX = 2;
 export const MODAL_BACKDROP_Z_INDEX = 100;
 export const MESSAGE_ENVELOPE_BORDER_MODE = "full";
+export const MESSAGE_ENVELOPE_BOTTOM_EDGE_MODE = "single";
 const modalBackdropStyle: CSSProperties = { zIndex: MODAL_BACKDROP_Z_INDEX };
 
 export function getMessageEnvelopeBorderMode() {
   return MESSAGE_ENVELOPE_BORDER_MODE;
+}
+
+export function getMessageEnvelopeBottomEdgeMode() {
+  return MESSAGE_ENVELOPE_BOTTOM_EDGE_MODE;
 }
 
 export function getResponsiveMessageDetailRows(viewportHeight: number, topbarHeight: number, activityLogHeight: number) {

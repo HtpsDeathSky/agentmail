@@ -8,6 +8,7 @@ import {
   formatGoogleSignInError,
   getAccountProviderFormMode,
   getAppShellClassName,
+  getMessageEnvelopeBottomEdgeMode,
   inferAccountProvider,
   getMessageEnvelopeBorderMode,
   getResponsiveMessageDetailRows,
@@ -161,8 +162,9 @@ describe("message detail rendering", () => {
 });
 
 describe("message envelope styles", () => {
-  it("uses a complete border around the mail header card", () => {
+  it("uses a complete border around the mail header card with a single bottom edge", () => {
     expect(getMessageEnvelopeBorderMode()).toBe("full");
+    expect(getMessageEnvelopeBottomEdgeMode()).toBe("single");
   });
 });
 
