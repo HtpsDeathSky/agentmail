@@ -145,7 +145,7 @@ export const MAIL_SYNC_EVENT = "agentmail-mail-sync";
 const WORKSPACE_LIST_MIN_WIDTH = 320;
 const WORKSPACE_DETAIL_MIN_WIDTH = 420;
 const WORKSPACE_DIVIDER_WIDTH = 8;
-export const MESSAGE_HEADER_STICKY_Z_INDEX = 2;
+export const MESSAGE_DETAIL_HEADER_LAYER_Z_INDEX = 2;
 export const MODAL_BACKDROP_Z_INDEX = 100;
 export const MESSAGE_ENVELOPE_BORDER_MODE = "full";
 export const MESSAGE_ENVELOPE_BOTTOM_EDGE_MODE = "single";
@@ -159,13 +159,25 @@ export function getMessageEnvelopeBottomEdgeMode() {
   return MESSAGE_ENVELOPE_BOTTOM_EDGE_MODE;
 }
 
-export function getResponsiveMessageDetailRows(viewportHeight: number, topbarHeight: number, activityLogHeight: number) {
+export function getResponsiveMessageDetailRows(
+  viewportHeight: number,
+  topbarHeight: number,
+  activityLogHeight: number,
+  viewportWidth = Number.POSITIVE_INFINITY
+) {
   const workspaceHeight = viewportHeight - topbarHeight - activityLogHeight;
   const accountRailHeight = Math.max(96, workspaceHeight * 0.2);
   const mailWorkspaceHeight = workspaceHeight - accountRailHeight;
-  const messageListHeight = Math.max(180, mailWorkspaceHeight * 0.34);
+  const usesCompactRows = viewportWidth <= 1039;
+  const messageListHeight = usesCompactRows ? Math.max(64, mailWorkspaceHeight * 0.16) : Math.max(180, mailWorkspaceHeight * 0.34);
   const detailPaneHeight = mailWorkspaceHeight - messageListHeight;
-  const detailScrollHeight = detailPaneHeight - 48;
+  const detailToolbarHeight = 48;
+  const messageHeaderFixedHeight = usesCompactRows ? 132 : 96;
+  const aiPanelHeight = usesCompactRows ? 64 : 220;
+  const messageBodyScrollHeight = Math.max(
+    1,
+    detailPaneHeight - detailToolbarHeight - messageHeaderFixedHeight - aiPanelHeight
+  );
 
   return {
     workspaceHeight,
@@ -173,7 +185,10 @@ export function getResponsiveMessageDetailRows(viewportHeight: number, topbarHei
     mailWorkspaceHeight,
     messageListHeight,
     detailPaneHeight,
-    detailScrollHeight
+    detailToolbarHeight,
+    messageHeaderFixedHeight,
+    aiPanelHeight,
+    messageBodyScrollHeight
   };
 }
 
@@ -1167,8 +1182,8 @@ export function App() {
                     DELETE
                   </button>
                 </div>
-                <div className="detail-scroll">
-                  <article className="message-detail">
+                <article className="message-reading-shell">
+                  <div className="message-header-fixed">
                     <div className="message-heading">
                       <span className={selectedMessage.flags.is_read ? "read-dot" : "unread-dot"} />
                       <h1>{selectedMessage.subject}</h1>
@@ -1213,6 +1228,8 @@ export function App() {
                         ))}
                       </div>
                     </div>
+                  </div>
+                  <div className="message-body-scroll">
                     {selectedRenderableHtml ? (
                       <div className="body-html-block">
                         <HtmlMailFrame html={selectedRenderableHtml} />
@@ -1230,16 +1247,16 @@ export function App() {
                         ))}
                       </div>
                     ) : null}
-                  </article>
-                  <AiPanel
-                    settings={aiSettings}
-                    insights={aiInsights}
-                    status={aiStatus}
-                    isAnalyzing={isAnalyzing}
-                    isActionRunning={isActionRunning}
-                    onAnalyze={handleSelectedAnalyze}
-                  />
-                </div>
+                  </div>
+                </article>
+                <AiPanel
+                  settings={aiSettings}
+                  insights={aiInsights}
+                  status={aiStatus}
+                  isAnalyzing={isAnalyzing}
+                  isActionRunning={isActionRunning}
+                  onAnalyze={handleSelectedAnalyze}
+                />
               </>
             ) : (
               <div className="empty-detail">

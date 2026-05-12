@@ -670,7 +670,7 @@ select {
 
 .detail-pane {
   display: grid;
-  grid-template-rows: 48px minmax(0, 1fr);
+  grid-template-rows: 48px minmax(0, 1fr) minmax(160px, 220px);
   flex: 1 1 0;
   min-height: 0;
   min-width: 420px;
@@ -693,15 +693,27 @@ select {
   font: 11px "Cascadia Mono", Consolas, monospace;
 }
 
-.message-detail {
+.message-reading-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
   min-height: 0;
-  overflow: visible;
+  overflow: hidden;
   padding: 22px;
 }
 
-.detail-scroll {
+.message-header-fixed {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+.message-body-scroll {
+  min-width: 0;
   min-height: 0;
   overflow: auto;
+  padding-right: 2px;
 }
 
 .message-heading {
@@ -737,9 +749,6 @@ select {
 }
 
 .message-envelope {
-  position: sticky;
-  top: 0;
-  z-index: 2;
   display: grid;
   gap: 12px;
   margin: 18px 0 16px;
@@ -911,7 +920,7 @@ select {
   grid-template-rows: auto auto auto minmax(0, 1fr) auto auto;
   gap: 9px;
   min-height: 0;
-  overflow: visible;
+  overflow: hidden;
   padding: 10px 12px;
   border-top: 1px solid var(--color-border);
   background: var(--color-surface-muted);
@@ -1062,6 +1071,8 @@ select {
 .ai-history {
   display: grid;
   gap: 4px;
+  min-height: 0;
+  overflow: auto;
 }
 
 .ai-history div {
@@ -1550,7 +1561,7 @@ select {
 
   .mail-workspace {
     display: grid;
-    grid-template-rows: minmax(180px, 34%) minmax(0, 1fr);
+    grid-template-rows: minmax(64px, 16%) minmax(0, 1fr);
   }
 
   .workspace-divider {
@@ -1569,7 +1580,57 @@ select {
   }
 
   .detail-pane {
+    grid-template-rows: 48px minmax(0, 1fr) 64px;
     min-height: 0;
+  }
+
+  .ai-panel {
+    overflow: auto;
+  }
+
+  .message-reading-shell {
+    padding: 8px 12px;
+  }
+
+  .message-envelope {
+    gap: 6px;
+    margin: 6px 0;
+    max-height: 92px;
+    overflow: auto;
+    padding: 8px;
+  }
+
+  .message-heading {
+    gap: 8px;
+  }
+
+  .message-heading h1 {
+    font-size: 18px;
+    line-height: 1.12;
+  }
+
+  .sender-identity {
+    grid-template-columns: 28px minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .sender-avatar {
+    width: 28px;
+    height: 28px;
+    font-size: 13px;
+  }
+
+  .sender-identity strong {
+    font-size: 13px;
+  }
+
+  .sender-identity div > span,
+  .recipient-chip {
+    font-size: 11px;
+  }
+
+  .message-secondary-meta {
+    gap: 4px;
   }
 
   .form-grid,
@@ -1645,7 +1706,7 @@ select {
   }
 
   .mail-workspace {
-    grid-template-rows: minmax(180px, 36%) minmax(0, 1fr);
+    grid-template-rows: minmax(64px, 16%) minmax(0, 1fr);
   }
 
   .message-row {
@@ -1660,8 +1721,8 @@ select {
     overflow: auto hidden;
   }
 
-  .message-detail {
-    padding: 16px;
+  .message-reading-shell {
+    padding: 8px 10px;
   }
 
   .status-console {

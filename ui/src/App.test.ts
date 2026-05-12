@@ -13,7 +13,7 @@ import {
   getMessageEnvelopeBorderMode,
   getResponsiveMessageDetailRows,
   getWorkspaceSplitModel,
-  MESSAGE_HEADER_STICKY_Z_INDEX,
+  MESSAGE_DETAIL_HEADER_LAYER_Z_INDEX,
   MODAL_BACKDROP_Z_INDEX,
   runGoogleSignInFlow
 } from "./App";
@@ -159,6 +159,32 @@ describe("message detail rendering", () => {
       await app.unmount();
     }
   });
+
+  it("keeps mail metadata and AI outside the body-only scroll region", async () => {
+    const app = await renderAppForTest();
+
+    try {
+      const htmlMessage = await findText(app.container, "HTML newsletter preview");
+      await act(async () => {
+        htmlMessage.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      const readingShell = await findSelector(app.container, ".message-reading-shell");
+      const fixedHeader = await findSelector(app.container, ".message-header-fixed");
+      const bodyScroll = await findSelector(app.container, ".message-body-scroll");
+      const aiPanel = await findSelector(app.container, ".ai-panel");
+
+      expect(readingShell.contains(fixedHeader)).toBe(true);
+      expect(readingShell.contains(bodyScroll)).toBe(true);
+      expect(readingShell.contains(aiPanel)).toBe(false);
+      expect(bodyScroll.contains(aiPanel)).toBe(false);
+      expect(fixedHeader.querySelector(".message-heading")).not.toBeNull();
+      expect(fixedHeader.querySelector(".message-envelope")).not.toBeNull();
+      expect(bodyScroll.querySelector(".body-html-block")).not.toBeNull();
+    } finally {
+      await app.unmount();
+    }
+  });
 });
 
 describe("message envelope styles", () => {
@@ -169,7 +195,7 @@ describe("message envelope styles", () => {
 });
 
 describe("modal layer styles", () => {
-  it("keeps modal backdrops above sticky message header metadata", async () => {
+  it("keeps modal backdrops above message detail metadata", async () => {
     const app = await renderAppForTest();
 
     try {
@@ -182,7 +208,7 @@ describe("modal layer styles", () => {
       const backdrop = await findSelector(app.container, ".modal-backdrop");
 
       expect(Number((backdrop as HTMLElement).style.zIndex)).toBe(MODAL_BACKDROP_Z_INDEX);
-      expect(MODAL_BACKDROP_Z_INDEX).toBeGreaterThan(MESSAGE_HEADER_STICKY_Z_INDEX);
+      expect(MODAL_BACKDROP_Z_INDEX).toBeGreaterThan(MESSAGE_DETAIL_HEADER_LAYER_Z_INDEX);
     } finally {
       await app.unmount();
     }
@@ -191,14 +217,14 @@ describe("modal layer styles", () => {
 
 describe("responsive message detail layout", () => {
   it("keeps enough medium-width detail height to show the complete message header card", () => {
-    const rows = getResponsiveMessageDetailRows(768, 58, 118);
+    const rows = getResponsiveMessageDetailRows(768, 58, 118, 780);
 
     expect(rows.workspaceHeight).toBe(592);
     expect(rows.accountRailHeight).toBeCloseTo(118.4, 1);
     expect(rows.mailWorkspaceHeight).toBeCloseTo(473.6, 1);
-    expect(rows.messageListHeight).toBe(180);
-    expect(rows.detailPaneHeight).toBeCloseTo(293.6, 1);
-    expect(rows.detailScrollHeight).toBeGreaterThan(175);
+    expect(rows.messageListHeight).toBeCloseTo(75.8, 1);
+    expect(rows.detailPaneHeight).toBeCloseTo(397.8, 1);
+    expect(rows.messageBodyScrollHeight).toBeGreaterThan(48);
   });
 });
 
