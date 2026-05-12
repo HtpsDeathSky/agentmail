@@ -3,11 +3,14 @@ import { createRoot, type Root } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
 import {
   App,
+  buildHtmlMailFrameDocument,
   clampWorkspaceSplitPercent,
   canStartGoogleSignIn,
   formatGoogleSignInError,
   getAccountProviderFormMode,
   getAppShellClassName,
+  getHtmlMailFrameMeasuredHeight,
+  getMessageBodyScrollClassName,
   getMessageEnvelopeBottomEdgeMode,
   inferAccountProvider,
   getMessageEnvelopeBorderMode,
@@ -165,7 +168,10 @@ describe("message detail rendering", () => {
       expect(htmlFrame?.getAttribute("sandbox")).toContain("allow-same-origin");
       expect(htmlFrame?.getAttribute("sandbox")).not.toContain("allow-scripts");
       expect(htmlFrame?.srcdoc).toContain("HTML Body");
-      expect(htmlFrame?.srcdoc).toContain('<body class="body-mail" style="background-color: #fff; color: #111;">');
+      expect(htmlFrame?.srcdoc).toContain(
+        '<body class="body-mail" style="background-color: #fff; color: #111; overflow-y: hidden !important;">'
+      );
+      expect(htmlFrame?.srcdoc).toContain('<div id="mail-root" style="overflow-y: hidden !important;">');
       expect(htmlFrame?.srcdoc).not.toContain('<body><div class="body-mail"');
       expect(app.container.querySelector(".metadata-grid")).toBeNull();
       expect(await findText(app.container, "Sender")).not.toBeNull();
@@ -199,6 +205,89 @@ describe("message detail rendering", () => {
     } finally {
       await app.unmount();
     }
+  });
+
+  it("returns html body scroll classes while measurement is pending", () => {
+    expect(getMessageBodyScrollClassName(true, true)).toBe(
+      "message-body-scroll message-body-scroll--html message-body-scroll--measuring"
+    );
+  });
+
+  it("renders html mail inside the stable body scroll frame", async () => {
+    const app = await renderAppForTest();
+
+    try {
+      const htmlMessage = await findText(app.container, "HTML newsletter preview");
+      await act(async () => {
+        htmlMessage.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      const bodyScroll = await findSelector(app.container, ".message-body-scroll");
+      const htmlBlock = await findSelector(app.container, ".body-html-block");
+
+      expect(bodyScroll.classList.contains("message-body-scroll--html")).toBe(true);
+      expect(bodyScroll.contains(htmlBlock)).toBe(true);
+      expect(htmlBlock.parentElement).toBe(bodyScroll);
+    } finally {
+      await app.unmount();
+    }
+  });
+
+  it("suppresses native vertical scrolling inside html iframe documents", async () => {
+    const app = await renderAppForTest();
+
+    try {
+      const htmlMessage = await findText(app.container, "HTML newsletter preview");
+      await act(async () => {
+        htmlMessage.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      const htmlFrame = await findSelector(app.container, ".body-html-frame") as HTMLIFrameElement;
+
+      expect(htmlFrame.srcdoc).toContain("overflow-y: hidden");
+      expect(htmlFrame.srcdoc).toContain("overflow-x: hidden");
+      expect(htmlFrame.srcdoc).toContain("max-width: 100%");
+      expect(htmlFrame.srcdoc).toContain(
+        '<body class="body-mail" style="background-color: #fff; color: #111; overflow-y: hidden !important;">'
+      );
+      expect(htmlFrame.srcdoc).toContain('<div id="mail-root" style="overflow-y: hidden !important;">');
+    } finally {
+      await app.unmount();
+    }
+  });
+
+  it("keeps html iframe vertical scrolling suppressed after hostile mail styles", () => {
+    const document = buildHtmlMailFrameDocument({
+      headStyles:
+        "<style>body { overflow-y: scroll !important; } html { overflow-y: scroll !important; } body.body-mail { overflow-y: scroll !important; } html body.body-mail { overflow-y: scroll !important; }</style>",
+      bodyAttributes: [
+        { name: "class", value: "body-mail" },
+        { name: "style", value: "overflow-y: scroll !important; color: #111;" }
+      ],
+      bodyHtml:
+        '<style>body.body-mail { overflow-y: scroll !important; } html body.body-mail { overflow-y: scroll !important; }</style><p>Hostile overflow</p>'
+    });
+    const injectedStyleIndex = document.lastIndexOf("html body.body-mail { overflow-y: scroll !important; }");
+    const finalGuardIndex = document.lastIndexOf("body.body-mail");
+    const bodyTagMatch = document.match(/<body([^>]*)>/);
+    const rootTagMatch = document.match(/<div id="mail-root"([^>]*)>/);
+
+    expect(injectedStyleIndex).toBeGreaterThan(-1);
+    expect(finalGuardIndex).toBeGreaterThan(injectedStyleIndex);
+    expect(document.slice(finalGuardIndex)).toContain("overflow-y: hidden !important");
+    expect(bodyTagMatch?.[1]).toContain("color: #111");
+    expect(bodyTagMatch?.[1]).toContain("overflow-y: hidden !important");
+    expect(rootTagMatch?.[1]).toContain("overflow-y: hidden !important");
+    expect(bodyTagMatch?.[1]).not.toContain("overflow-y: scroll");
+  });
+
+  it("measures html iframe height from content metrics without preserving client height", () => {
+    expect(
+      getHtmlMailFrameMeasuredHeight({
+        root: { scrollHeight: 64, offsetHeight: 64, clientHeight: 360 },
+        body: { scrollHeight: 80, offsetHeight: 80, clientHeight: 360 }
+      })
+    ).toBe(80);
   });
 
   it("places ANALYZE immediately after DELETE in the detail toolbar", async () => {

@@ -10,3 +10,7 @@ src-tauri/gen/
 .idea/
 .vscode/
 .codex
+.playwright-mcp/
+*.png
+package.json
+pnpm-lock.yaml

@@ -716,6 +716,18 @@ select {
   padding-right: 2px;
 }
 
+.message-body-scroll--html {
+  overflow: auto;
+  padding-right: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: #fff;
+}
+
+.message-body-scroll--measuring {
+  overflow: hidden;
+}
+
 .message-heading {
   display: grid;
   grid-template-columns: 10px minmax(0, 1fr);
@@ -877,10 +889,10 @@ select {
 
 .body-html-block {
   min-width: 0;
-  min-height: 220px;
+  min-height: 0;
   padding: 0;
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border: 0;
+  border-radius: 0;
   background: #fff;
   overflow: hidden;
 }
@@ -888,8 +900,13 @@ select {
 .body-html-frame {
   display: block;
   width: 100%;
-  min-height: 260px;
   border: 0;
+  background: #fff;
+}
+
+.message-body-scroll--html .attachment-strip {
+  margin-top: 0;
+  padding: 0 12px 12px;
   background: #fff;
 }
 

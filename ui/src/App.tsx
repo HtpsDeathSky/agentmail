@@ -159,6 +159,11 @@ export function getMessageEnvelopeBottomEdgeMode() {
   return MESSAGE_ENVELOPE_BOTTOM_EDGE_MODE;
 }
 
+export function getMessageBodyScrollClassName(hasHtmlBody: boolean, isMeasuringHtmlBody: boolean) {
+  if (!hasHtmlBody) return "message-body-scroll";
+  return `message-body-scroll message-body-scroll--html${isMeasuringHtmlBody ? " message-body-scroll--measuring" : ""}`;
+}
+
 export function getResponsiveMessageDetailRows(
   viewportHeight: number,
   topbarHeight: number,
@@ -256,26 +261,59 @@ function splitMailbox(value: string) {
   };
 }
 
-function HtmlMailFrame({ html }: { html: RenderableMailHtml }) {
-  const [height, setHeight] = useState(360);
+const GENERATED_VERTICAL_OVERFLOW_GUARD_STYLE = "overflow-y: hidden !important;";
 
-  const resizeFrameElement = useCallback((frame: HTMLIFrameElement) => {
-    const body = frame.contentDocument?.body;
-    const nextHeight = Math.max(body?.scrollHeight ?? 0, body?.offsetHeight ?? 0, 260);
-    setHeight(Math.min(nextHeight, 16000));
-  }, []);
+function serializeHtmlMailBodyAttributes(attributes: RenderableMailHtml["bodyAttributes"]) {
+  const normalizedAttributes = attributes
+    .map((attribute) =>
+      attribute.name.toLowerCase() === "style"
+        ? { ...attribute, value: appendVerticalOverflowGuardStyle(removeVerticalOverflowStyle(attribute.value)) }
+        : attribute
+    )
+    .filter((attribute) => attribute.name.toLowerCase() !== "style" || attribute.value.trim());
 
-  const document = useMemo(
-    () => `<!doctype html>
+  const hasStyleAttribute = normalizedAttributes.some((attribute) => attribute.name.toLowerCase() === "style");
+  const guardedAttributes = hasStyleAttribute
+    ? normalizedAttributes
+    : [...normalizedAttributes, { name: "style", value: GENERATED_VERTICAL_OVERFLOW_GUARD_STYLE }];
+
+  return serializeHtmlAttributes(guardedAttributes);
+}
+
+function removeVerticalOverflowStyle(style: string) {
+  const declarations = style
+    .split(";")
+    .map((declaration) => declaration.trim())
+    .filter((declaration) => {
+      if (!declaration) return false;
+      const colonIndex = declaration.indexOf(":");
+      if (colonIndex < 0) return false;
+      const property = declaration.slice(0, colonIndex).trim().toLowerCase();
+      return property !== "overflow" && property !== "overflow-y";
+    });
+
+  return declarations.length > 0 ? `${declarations.join("; ")};` : "";
+}
+
+function appendVerticalOverflowGuardStyle(style: string) {
+  const trimmed = style.trim();
+  return trimmed ? `${trimmed} ${GENERATED_VERTICAL_OVERFLOW_GUARD_STYLE}` : GENERATED_VERTICAL_OVERFLOW_GUARD_STYLE;
+}
+
+export function buildHtmlMailFrameDocument(html: RenderableMailHtml) {
+  return `<!doctype html>
 <html>
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <base target="_blank">
     <style>
-      html {
+      html,
+      body {
         margin: 0;
         padding: 0;
+        overflow-x: hidden;
+        overflow-y: hidden;
         background: #fff;
         color: #111;
         color-scheme: light;
@@ -283,11 +321,10 @@ function HtmlMailFrame({ html }: { html: RenderableMailHtml }) {
 
       body {
         box-sizing: border-box;
-        margin: 0;
-        padding: 16px;
         overflow-wrap: anywhere;
-        background: #fff;
-        color: #111;
+        width: 100%;
+        max-width: 100%;
+        padding: 16px;
         font: 14px/1.5 Arial, Helvetica, sans-serif;
       }
 
@@ -301,19 +338,76 @@ function HtmlMailFrame({ html }: { html: RenderableMailHtml }) {
       }
 
       table {
+        width: auto;
         max-width: 100%;
       }
 
       pre {
+        max-width: 100%;
+        overflow-x: auto;
         white-space: pre-wrap;
       }
     </style>
     ${html.headStyles}
+    <style>
+      html,
+      body,
+      #mail-root {
+        overflow-y: hidden;
+      }
+    </style>
   </head>
-  <body${serializeHtmlAttributes(html.bodyAttributes)}>${html.bodyHtml}</body>
-</html>`,
-    [html]
+  <body${serializeHtmlMailBodyAttributes(html.bodyAttributes)}><div id="mail-root" style="${GENERATED_VERTICAL_OVERFLOW_GUARD_STYLE}">${html.bodyHtml}</div><style>
+      html,
+      body,
+      body[style],
+      body[class],
+      body.body-mail,
+      #mail-root {
+        overflow-y: hidden !important;
+      }
+    </style>
+  </body>
+</html>`;
+}
+
+interface HtmlMailFrameHeightMetrics {
+  scrollHeight: number;
+  offsetHeight: number;
+  clientHeight?: number;
+}
+
+type HtmlMailFrameHeightElement = HtmlMailFrameHeightMetrics | null | undefined;
+
+export function getHtmlMailFrameMeasuredHeight({
+  root,
+  body
+}: {
+  root: HtmlMailFrameHeightElement;
+  body: HtmlMailFrameHeightElement;
+}) {
+  const contentHeight = Math.max(
+    root?.scrollHeight ?? 0,
+    root?.offsetHeight ?? 0,
+    body?.scrollHeight ?? 0,
+    body?.offsetHeight ?? 0,
+    1
   );
+
+  return Math.min(contentHeight, 16000);
+}
+
+function HtmlMailFrame({ html, onMeasured }: { html: RenderableMailHtml; onMeasured: () => void }) {
+  const [height, setHeight] = useState(180);
+
+  const resizeFrameElement = useCallback((frame: HTMLIFrameElement) => {
+    const body = frame.contentDocument?.body;
+    const root = frame.contentDocument?.getElementById("mail-root");
+    setHeight(getHtmlMailFrameMeasuredHeight({ root, body }));
+    onMeasured();
+  }, [onMeasured]);
+
+  const document = useMemo(() => buildHtmlMailFrameDocument(html), [html]);
 
   const resizeFrame = useCallback((event: SyntheticEvent<HTMLIFrameElement>) => {
     const frame = event.currentTarget;
@@ -1010,6 +1104,16 @@ export function App() {
   const selectedRenderableHtml = selectedMessage?.html_body
     ? buildRenderableMailHtml(selectedMessage.html_body, selectedMessage.inline_resources ?? [])
     : null;
+  const selectedHtmlMeasurementKey =
+    selectedMessage && selectedRenderableHtml ? `${selectedMessage.id}:${selectedMessage.html_body ?? ""}` : null;
+  const [measuredHtmlMessageId, setMeasuredHtmlMessageId] = useState<string | null>(null);
+  const isMeasuringHtmlMessage = Boolean(selectedHtmlMeasurementKey && measuredHtmlMessageId !== selectedHtmlMeasurementKey);
+  const markSelectedHtmlMeasured = useCallback(() => {
+    if (selectedHtmlMeasurementKey) {
+      setMeasuredHtmlMessageId(selectedHtmlMeasurementKey);
+    }
+  }, [selectedHtmlMeasurementKey]);
+  const bodyScrollClassName = getMessageBodyScrollClassName(Boolean(selectedRenderableHtml), isMeasuringHtmlMessage);
 
   return (
     <main className={getAppShellClassName(showActivityLog)}>
@@ -1248,10 +1352,13 @@ export function App() {
                       {selectedAiStatus ? <div className="message-ai-status">{selectedAiStatus}</div> : null}
                     </div>
                   </div>
-                  <div className="message-body-scroll">
+                  <div className={bodyScrollClassName}>
                     {selectedRenderableHtml ? (
                       <div className="body-html-block">
-                        <HtmlMailFrame html={selectedRenderableHtml} />
+                        <HtmlMailFrame
+                          html={selectedRenderableHtml}
+                          onMeasured={markSelectedHtmlMeasured}
+                        />
                       </div>
                     ) : (
                       <pre className="body-block">{selectedMessage.body ?? selectedMessage.body_preview}</pre>
